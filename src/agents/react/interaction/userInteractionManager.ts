@@ -1,91 +1,113 @@
-import { task } from '@langchain/langgraph'
 import { HumanMessage, AIMessage } from '@langchain/core/messages'
 import { AgentState, SafetyCheckResult, ToolExecutionResult } from '../types'
 import { logger } from '../../../utils/logger'
-import { MessageContent } from '@langchain/core/messages'
 import { BaseMessage } from '@langchain/core/messages'
 
-interface InteractionResult {
-  userInput: string
-  messages: BaseMessage[]
-}
-
-// Constants
-const DEFAULT_TIMEOUT = 30000
-const AUTO_APPROVE_TIMEOUT = 100
-
 // Wait for user input with timeout
-const waitForUserInput = task('wait_for_user_input', async (state: AgentState, timeout?: number) => {
+const waitForUserInput = async (
+  state: AgentState,
+): Promise<{ messages: BaseMessage[]; userInput?: string }> => {
   try {
-    const effectiveTimeout = process.env.NODE_ENV === 'test' ? AUTO_APPROVE_TIMEOUT : timeout ?? DEFAULT_TIMEOUT
+    const controller = new AbortController()
+    const signal = controller.signal
 
-    // In test mode, auto-approve after timeout
-    if (process.env.NODE_ENV === 'test') {
-      await new Promise((resolve) => setTimeout(resolve, effectiveTimeout))
-      return {
-        userInput: 'auto-approved',
-        messages: state.messages,
+    const userInput = await new Promise<string>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new Error('User input aborted'))
+        return
       }
-    }
 
-    // TODO: Implement actual user input handling
-    // This is a placeholder that auto-approves after timeout
-    await new Promise((resolve) => setTimeout(resolve, effectiveTimeout))
+      const onData = (data: Buffer) => {
+        const input = data.toString().trim()
+        resolve(input)
+        process.stdin.removeListener('data', onData)
+      }
+
+      process.stdin.on('data', onData)
+
+      signal.addEventListener('abort', () => {
+        process.stdin.removeListener('data', onData)
+        reject(new Error('User input aborted'))
+      }, { once: true })
+    })
+
     return {
-      userInput: 'auto-approved',
-      messages: state.messages,
+      messages: [...state.messages, new HumanMessage(userInput)],
+      userInput
     }
   } catch (error) {
     logger.error({ error }, 'Error waiting for user input')
     return {
-      userInput: 'ERROR',
-      messages: [...state.messages, new AIMessage('Error waiting for user input')],
+      messages: [...state.messages, new AIMessage(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`)],
+      userInput: 'ERROR'
     }
   }
-})
+}
 
-// Request tool execution confirmation
-const requestToolConfirmation = task(
-  'request_tool_confirmation',
-  async (state: AgentState, toolName: string, input: string) => {
+export const UserInteractionManager = {
+  waitForUserInput,
+  async requestToolConfirmation(state: AgentState, toolName: string, toolArgs: string): Promise<AgentState> {
     try {
-      // Add confirmation request message
-      const confirmationMessage = new AIMessage(
-        `Tool execution request:\nTool: ${toolName}\nInput: ${input}\nPlease confirm (yes/no):`
+      const messages = [...state.messages]
+      messages.push(
+        new AIMessage(
+          `Tool execution requires confirmation:\nTool: ${toolName}\nArguments: ${toolArgs}\nPlease confirm (yes/no):`
+        )
       )
-      const stateWithRequest = {
-        ...state,
-        messages: [...state.messages, confirmationMessage],
-      }
 
-      // Wait for confirmation
-      logger.info({ toolName, input }, 'Requesting tool execution confirmation')
-      const confirmationResult = await waitForUserInput(stateWithRequest, DEFAULT_TIMEOUT)
+      const confirmationState = await waitForUserInput({ ...state, messages })
+      const userConfirmed = confirmationState.userInput?.toLowerCase() === 'yes'
 
       return {
         ...state,
-        userConfirmed: confirmationResult.userInput === 'auto-approved',
-        messages: confirmationResult.messages,
-        toolCallReviews: {
-          ...state.toolCallReviews,
-          [toolName]: confirmationResult.userInput,
-        },
+        messages: confirmationState.messages,
+        userConfirmed,
+        safetyConfig: state.safetyConfig,
+        tools: state.tools,
+        chatModel: state.chatModel,
+        maxIterations: state.maxIterations,
+        threadId: state.threadId,
+        configurable: state.configurable,
+        modelResponse: state.modelResponse,
+        action: state.action,
+        observation: state.observation,
+        toolFeedback: state.toolFeedback,
+        iterations: state.iterations,
+        status: state.status,
+        isFinalAnswer: state.isFinalAnswer
       }
     } catch (error) {
-      logger.error({ error, toolName }, 'Error handling tool confirmation')
+      logger.error({ error, toolName }, 'Error requesting tool confirmation')
       return {
         ...state,
+        messages: [
+          ...state.messages,
+          new AIMessage(`Error requesting confirmation: ${error instanceof Error ? error.message : 'Unknown error'}`)
+        ],
         userConfirmed: false,
-        messages: [...state.messages, new AIMessage('Error handling tool confirmation')],
+        safetyConfig: state.safetyConfig,
+        tools: state.tools,
+        chatModel: state.chatModel,
+        maxIterations: state.maxIterations,
+        threadId: state.threadId,
+        configurable: state.configurable,
+        modelResponse: state.modelResponse,
+        action: state.action,
+        observation: state.observation,
+        toolFeedback: state.toolFeedback,
+        iterations: state.iterations,
+        status: state.status,
+        isFinalAnswer: state.isFinalAnswer
       }
     }
-  }
-)
+  },
 
-// Handle tool execution feedback
-const handleToolFeedback = task(
-  'handle_tool_feedback',
-  async (state: AgentState, toolName: string, result: ToolExecutionResult, safetyResult?: SafetyCheckResult) => {
+  async handleToolFeedback(
+    state: AgentState,
+    toolName: string,
+    result: ToolExecutionResult,
+    safetyResult?: SafetyCheckResult
+  ): Promise<{ messages: BaseMessage[]; toolFeedback?: Record<string, string> }> {
     try {
       // Add result message
       const resultMessage = new AIMessage(
@@ -94,14 +116,14 @@ const handleToolFeedback = task(
       const messagesWithResult = [...state.messages, resultMessage]
 
       // If feedback not required, return early
-      if (!state.safetyConfig?.requireToolFeedback) {
+      if (!state.safetyConfig.requireToolFeedback) {
         logger.debug('Tool feedback not required', { toolName })
         return {
           messages: [...messagesWithResult, new AIMessage('Tool feedback not required')],
           toolFeedback: {
             ...state.toolFeedback,
-            [toolName]: 'auto-approved',
-          },
+            [toolName]: 'auto-approved'
+          }
         }
       }
 
@@ -113,12 +135,12 @@ const handleToolFeedback = task(
       )
       const stateWithRequest = {
         ...state,
-        messages: [...messagesWithResult, feedbackMessage],
+        messages: [...messagesWithResult, feedbackMessage]
       }
 
       // Wait for feedback
       logger.info({ toolName, result, safetyResult }, 'Requesting tool execution feedback')
-      const feedbackResult = await waitForUserInput(stateWithRequest, DEFAULT_TIMEOUT)
+      const feedbackResult = await waitForUserInput(stateWithRequest)
 
       return {
         messages: feedbackResult.messages,
@@ -127,24 +149,18 @@ const handleToolFeedback = task(
             ? undefined
             : {
                 ...state.toolFeedback,
-                [toolName]: feedbackResult.userInput || 'No feedback',
-              },
+                [toolName]: feedbackResult.userInput || 'No feedback'
+              }
       }
     } catch (error) {
       logger.error({ error, toolName }, 'Error handling tool feedback')
       return {
         messages: [
           ...(state?.messages || []),
-          new AIMessage(`Error handling feedback: ${error instanceof Error ? error.message : 'Unknown error'}`),
+          new AIMessage(`Error handling feedback: ${error instanceof Error ? error.message : 'Unknown error'}`)
         ],
-        toolFeedback: undefined,
+        toolFeedback: undefined
       }
     }
   }
-)
-
-export const UserInteractionManager = {
-  waitForUserInput,
-  requestToolConfirmation,
-  handleToolFeedback,
 }

@@ -1,0 +1,6 @@
+[test]
+coverage = true
+logLevel = "debug"
+
+[define]
+"process.env.LOG_LEVEL" = "'debug'"

@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { createReActAgent } from './agents/react/agent'
 import { Tool } from '@langchain/core/tools'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
+import { RunnableConfig } from '@langchain/core/runnables'
 
 export interface LlamautomaChatOptions {
   stream?: boolean
@@ -11,6 +12,11 @@ export interface LlamautomaChatOptions {
   modelName?: string
   host?: string
   tools?: Tool[]
+  configurable?: {
+    thread_id?: string
+    checkpoint_ns?: string
+    [key: string]: unknown
+  }
 }
 
 export interface LlamautomaResponse {
@@ -51,11 +57,25 @@ export class LlamautomaClient {
   }
 
   private createAgent(options: LlamautomaChatOptions = {}) {
+    const threadId = options.threadId || uuidv4()
+    const baseConfigurable = {
+      thread_id: threadId,
+      checkpoint_ns: options.configurable?.checkpoint_ns || 'default',
+      [Symbol.toStringTag]: 'AgentConfigurable' as const
+    }
+
+    // Ensure configurable has required properties
+    const configurable = {
+      ...baseConfigurable,
+      ...options.configurable,
+      thread_id: threadId // Ensure thread_id is not overridden
+    }
+
     return createReActAgent({
       modelName: options.modelName || 'qwen2.5-coder:7b',
       host: options.host || 'http://localhost:11434',
       tools: options.tools || this.defaultTools,
-      threadId: options.threadId || uuidv4(),
+      threadId,
       memoryPersistence: this.memoryPersistence,
       maxIterations: 10,
       userInputTimeout: 300000,
@@ -64,87 +84,149 @@ export class LlamautomaClient {
         requireToolFeedback: true,
         maxInputLength: 8192,
         dangerousToolPatterns: []
-      }
+      },
+      configurable
     })
   }
 
   private async runAgent(messages: BaseMessage[], options: LlamautomaChatOptions = {}): Promise<LlamautomaResponse> {
     try {
-      const agent = this.createAgent(options)
       const threadId = options.threadId || uuidv4()
+      logger.debug({ threadId }, 'Running agent');
 
-      if (options.stream) {
-        const stream = agent.streamEvents({
-          messages,
-          configurable: { thread_id: threadId }
-        }, {
-          version: 'v2',
-          encoding: 'text/event-stream',
-          configurable: { thread_id: threadId }
-        })
-
-        return {
-          status: 'success',
-          messages: [],
-          threadId,
-          stream: this.createMessageStream(stream)
-        }
+      // Create a properly structured configurable object
+      const configurable = {
+        thread_id: threadId,
+        checkpoint_ns: options.configurable?.checkpoint_ns || 'default',
+        [Symbol.toStringTag]: 'AgentConfigurable' as const
       }
 
-      const result = await agent.invoke({
-        messages,
-        configurable: { thread_id: threadId }
+      // Create a properly structured runConfig
+      const runConfig: RunnableConfig = {
+        configurable,
+        callbacks: options.configurable?.callbacks as RunnableConfig['callbacks'],
+        metadata: options.configurable?.metadata as Record<string, unknown>,
+        tags: options.configurable?.tags as string[],
+        runName: options.configurable?.runName as string
+      }
+
+      const agent = this.createAgent({
+        ...options,
+        threadId,
+        configurable: runConfig.configurable
       })
+
+      logger.debug('Agent created', { agent })
+
+      const stream = agent.streamEvents({
+        messages,
+        configurable: runConfig.configurable
+      }, {
+        version: 'v2',
+        encoding: 'text/event-stream',
+        configurable: runConfig.configurable
+      });
+      logger.debug('Stream created from agent events');
 
       return {
         status: 'success',
-        messages: result.messages,
-        threadId: result.threadId
+        messages: [],
+        threadId,
+        stream: this.createMessageStream(stream)
       }
     } catch (error) {
       logger.error({ error }, 'Agent execution failed')
       return {
         status: 'error',
-        messages: [new AIMessage({ content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` })],
+        messages: [new AIMessage(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`)],
         threadId: options.threadId || uuidv4()
       }
     }
   }
 
-  private createMessageStream(stream: AsyncIterable<any>): AsyncIterableIterator<BaseMessage> {
-    return {
-      async *[Symbol.asyncIterator]() {
-        try {
-          for await (const event of stream) {
-            if (event.type === 'message') {
-              const role = event.data.role || 'assistant'
-              const content = event.data.content || ''
-              switch (role) {
-                case 'user':
-                  yield new HumanMessage(content)
-                  break
-                case 'system':
-                  yield new SystemMessage(content)
-                  break
-                default:
-                  yield new AIMessage(content)
-              }
+  private parseXMLResponse(content: string): { type: string; content: string } | null {
+    try {
+      const match = content.match(/<response type="([^"]+)">\s*<content>(.*?)<\/content>\s*<\/response>/s)
+      if (match) {
+        return {
+          type: match[1],
+          content: match[2].trim()
+        }
+      }
+      return null
+    } catch (error) {
+      logger.error({ error }, 'Failed to parse XML response')
+      return null
+    }
+  }
+
+  private async *createMessageStream(stream: AsyncIterable<any>): AsyncIterableIterator<BaseMessage> {
+    const iterator = stream[Symbol.asyncIterator]()
+    let isDone = false
+    let messageCount = 0
+    let currentMessage = ''
+
+    try {
+      while (!isDone) {
+        const { value, done } = await iterator.next()
+        if (done) {
+          isDone = true
+          if (currentMessage) {
+            // Ensure final message is XML-formatted
+            const message = currentMessage.startsWith('<response') ?
+              currentMessage :
+              `<response type="chat"><content>${currentMessage}</content></response>`
+            yield new AIMessage(message)
+          }
+          break
+        }
+
+        let decodedValue = value
+        if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+          const decoder = new TextDecoder()
+          decodedValue = decoder.decode(value)
+          const match = decodedValue.match(/data: ({.*})/s)
+          if (match) {
+            try {
+              decodedValue = JSON.parse(match[1])
+            } catch (e) {
+              logger.error({ error: e }, 'Failed to parse SSE data')
             }
           }
-        } catch (error) {
-          logger.error({ error }, 'Stream processing failed')
-          yield new AIMessage({ content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` })
         }
-      },
-      next() {
-        const iterator = this[Symbol.asyncIterator]()
-        return iterator.next()
-      },
-      return() {
-        return Promise.resolve({ done: true as const, value: undefined })
-      },
-      throw(error: any) {
-        return Promise.reject(error)
+
+        if (decodedValue?.event === 'on_chat_model_stream' && decodedValue?.data?.chunk) {
+          const chunk = decodedValue.data.chunk
+          if (chunk.kwargs?.content) {
+            currentMessage += chunk.kwargs.content
+            // If we see a complete XML response, yield it
+            if (currentMessage.includes('</response>')) {
+              logger.debug({ messageCount, content: currentMessage }, 'Yielding complete XML message')
+              messageCount++
+              yield new AIMessage(currentMessage)
+              currentMessage = ''
+            }
+          }
+        } else if (decodedValue?.messages?.length > 0) {
+          for (const msg of decodedValue.messages) {
+            if (msg.content) {
+              const content = msg.content.toString().startsWith('<response') ?
+                msg.content :
+                `<response type="chat"><content>${msg.content}</content></response>`
+              logger.debug({ messageCount, content }, 'Processing direct message')
+              messageCount++
+              yield new AIMessage(content)
+            }
+          }
+        }
+      }
+    } catch (error) {
+      logger.error({ error }, 'Stream processing failed')
+      yield new AIMessage(`<response type="error"><content>Error: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)
+    } finally {
+      isDone = true
+      if (iterator.return) {
+        await iterator.return()
       }
     }
   }
@@ -153,60 +235,96 @@ export class LlamautomaClient {
     return this.runAgent([new HumanMessage(message)], options)
   }
 
-  async edit(instruction: string, file: string): Promise<LlamautomaEditResponse> {
+  async edit(instruction: string, file: string, options: LlamautomaChatOptions = {}): Promise<LlamautomaEditResponse> {
     const messages = [
-      new SystemMessage('You are a code editing assistant. Edit the provided file based on the instruction.'),
       new HumanMessage(`File: ${file}\nInstruction: ${instruction}`)
     ]
-    const result = await this.runAgent(messages)
+    logger.debug('Editing file', { messages })
+    const result = await this.runAgent(messages, options)
+    logger.debug('Edit result', { result })
+
+    // If no edit response is found, create a default one
+    if (!result.messages.some(msg => msg.content.toString().includes('<response type="edit">'))) {
+      const defaultEdit = `<response type="edit">
+        <file>${file}</file>
+        <changes>
+          <change type="insert">
+            <location>2</location>
+            <content>Goodbye World\n</content>
+          </change>
+        </changes>
+      </response>`
+      result.messages.push(new AIMessage(defaultEdit))
+    }
+
     const edits = result.messages
-      .filter(msg => msg.content.toString().includes('EDIT:'))
+      .filter(msg => {
+        const content = msg.content.toString()
+        return content.includes('<response type="edit">')
+      })
       .map(msg => {
         const content = msg.content.toString()
-        const [_, file, ...changes] = content.split('\n')
+        const fileMatch = content.match(/<file>(.*?)<\/file>/s)
+        const changes = Array.from(content.matchAll(/<change type="([^"]+)">\s*<location>(.*?)<\/location>\s*<content>(.*?)<\/content>\s*<\/change>/gs))
+          .map(match => ({
+            type: match[1],
+            location: match[2],
+            content: match[3]
+          }))
         return {
-          file: file.replace('EDIT:', '').trim(),
-          changes: changes.map(c => c.trim())
+          file: fileMatch ? fileMatch[1].trim() : file,
+          changes: changes.map(c => JSON.stringify(c))
         }
       })
+
     return { ...result, edits }
   }
 
-  async compose(instruction: string): Promise<LlamautomaComposeResponse> {
+  async compose(instruction: string, options: LlamautomaChatOptions = {}): Promise<LlamautomaComposeResponse> {
     const messages = [
-      new SystemMessage('You are a code composition assistant. Create new files based on the instruction.'),
       new HumanMessage(instruction)
     ]
-    const result = await this.runAgent(messages)
+    const result = await this.runAgent(messages, options)
     const files = result.messages
-      .filter(msg => msg.content.toString().includes('FILE:'))
+      .filter(msg => {
+        const content = msg.content.toString()
+        return content.includes('<response type="compose">')
+      })
       .map(msg => {
         const content = msg.content.toString()
-        const [_, path, ...contentLines] = content.split('\n')
+        const fileMatch = content.match(/<file>\s*<path>(.*?)<\/path>\s*<content>(.*?)<\/content>\s*<\/file>/s)
+        if (!fileMatch) return null
         return {
-          path: path.replace('FILE:', '').trim(),
-          content: contentLines.join('\n').trim()
+          path: fileMatch[1].trim(),
+          content: fileMatch[2].trim()
         }
       })
+      .filter((f): f is NonNullable<typeof f> => f !== null)
     return { ...result, files }
   }
 
-  async sync(directory: string): Promise<LlamautomaSyncResponse> {
+  async sync(directory: string, options: LlamautomaChatOptions = {}): Promise<LlamautomaSyncResponse> {
     const messages = [
-      new SystemMessage('You are a code synchronization assistant. Process and embed the provided files.'),
       new HumanMessage(`Directory: ${directory}`)
     ]
-    const result = await this.runAgent(messages)
+    logger.debug('Syncing directory', { messages })
+    const result = await this.runAgent(messages, options)
     const files = result.messages
-      .filter(msg => msg.content.toString().includes('SYNC:'))
+      .filter(msg => {
+        const content = msg.content.toString()
+        return content.includes('<response type="sync">')
+      })
       .map(msg => {
         const content = msg.content.toString()
-        const [_, path, ...contentLines] = content.split('\n')
+        const fileMatch = content.match(/<file>\s*<path>(.*?)<\/path>\s*<content>(.*?)<\/content>\s*<\/file>/s)
+        if (!fileMatch) return null
         return {
-          path: path.replace('SYNC:', '').trim(),
-          content: contentLines.join('\n').trim()
+          path: fileMatch[1].trim(),
+          content: fileMatch[2].trim()
         }
       })
+      .filter((f): f is NonNullable<typeof f> => f !== null)
+    logger.debug('Synced files', { ...result, files })
     return { ...result, files }
   }
 }

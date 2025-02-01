@@ -54,6 +54,7 @@ const saveToMemory = task(
   ): Promise<MemoryState> => {
     try {
       const effectiveCheckpointNs = config?.configurable?.checkpoint_ns ?? checkpoint_ns
+      const threadId = config?.configurable?.thread_id
       const now = Date.now()
 
       // Create checkpoint
@@ -80,6 +81,7 @@ const saveToMemory = task(
         {
           configurable: {
             checkpoint_ns: effectiveCheckpointNs,
+            thread_id: threadId,
           },
         },
         checkpoint,
@@ -113,11 +115,13 @@ const loadFromMemory = task(
   ): Promise<MemoryState> => {
     try {
       const effectiveCheckpointNs = config?.configurable?.checkpoint_ns ?? checkpoint_ns
+      const threadId = config?.configurable?.thread_id
       const contextWindow = config?.configurable?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
 
       const checkpoint = await memoryPersistence.get({
         configurable: {
           checkpoint_ns: effectiveCheckpointNs,
+          thread_id: threadId,
         },
       })
 

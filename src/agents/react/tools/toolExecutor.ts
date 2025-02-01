@@ -57,17 +57,11 @@ const executeWithRetries = task('execute_with_retries', async (tool: Tool, input
       attempt++
       if (attempt < MAX_RETRIES) {
         await new Promise((resolve) => {
-          const timeout = setTimeout(resolve, delay)
-          if (signal) {
-            signal.addEventListener(
-              'abort',
-              () => {
-                clearTimeout(timeout)
-                resolve(undefined)
-              },
-              { once: true }
-            )
+          if (signal?.aborted) {
+            resolve(undefined)
+            return
           }
+          resolve(undefined)
         })
         delay = Math.min(delay * 2, MAX_RETRY_DELAY)
       }

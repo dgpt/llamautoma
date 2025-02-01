@@ -10,6 +10,13 @@ export const logger = pino({
       colorize: true,
       translateTime: 'SYS:standard',
       ignore: 'pid,hostname',
+      messageFormat: '{msg} {context}',
+      levelFirst: true,
+    },
+  },
+  formatters: {
+    level: (label) => {
+      return { level: label.toUpperCase() }
     },
   },
 })

@@ -4,6 +4,7 @@ import { MemorySaver } from '@langchain/langgraph'
 import { Tool } from '@langchain/core/tools'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
+import { SafetyConfig } from '../../types/agent'
 
 /**
  * Configuration for the ReAct Agent
@@ -26,29 +27,13 @@ export interface ReActAgentConfig {
   /** Timeout for user input in milliseconds (default: 5000) */
   userInputTimeout?: number
   /** Optional safety configuration */
-  safetyConfig?: AgentSafetyConfig
+  safetyConfig?: SafetyConfig
   /** Maximum age of memory entries in milliseconds (default: 24 hours) */
   maxAge?: number
   /** Maximum number of memory entries to keep (default: 1000) */
   maxEntries?: number
   /** Threshold for memory relevancy (default: 0.7) */
   relevancyThreshold?: number
-}
-
-/**
- * Safety configuration for the agent
- */
-export interface AgentSafetyConfig {
-  /** Whether to require user confirmation for tool calls (default: true) */
-  requireToolConfirmation?: boolean
-  /** Whether to require user feedback after tool execution (default: false) */
-  requireToolFeedback?: boolean
-  /** Maximum allowed input length for tool calls (default: 1000) */
-  maxInputLength?: number
-  /** List of dangerous tool name patterns to warn about */
-  dangerousToolPatterns?: string[]
-  /** Custom safety checks to run before tool execution */
-  safetyChecks?: SafetyCheck[]
 }
 
 /**
@@ -78,7 +63,7 @@ export interface AgentState {
   /** User input */
   userInput?: string
   /** Safety configuration */
-  safetyConfig: AgentSafetyConfig
+  safetyConfig: SafetyConfig
   /** Record of tool feedback */
   toolFeedback: Record<string, string>
   /** Current model response */
@@ -161,23 +146,11 @@ export interface AgentOutput {
 }
 
 /**
- * Safety check configuration
- */
-export interface SafetyCheck {
-  /** Name of the safety check */
-  name: string
-  /** Description of what the check verifies */
-  description: string
-  /** Function to perform the safety check */
-  check: (toolName: string, input: string) => Promise<SafetyCheckResult>
-}
-
-/**
  * Tool executor configuration
  */
 export interface ToolExecutorConfig {
   /** Safety configuration */
-  safetyConfig?: AgentSafetyConfig
+  safetyConfig?: SafetyConfig
   /** Timeout for user input in milliseconds */
   userInputTimeout?: number
 }

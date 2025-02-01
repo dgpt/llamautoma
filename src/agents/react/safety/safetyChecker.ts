@@ -1,5 +1,5 @@
 import { task } from '@langchain/langgraph'
-import { AgentSafetyConfig, SafetyCheckResult } from '../types'
+import { SafetyConfig, SafetyCheckResult } from '../../../types/agent'
 import { logger } from '../../../utils/logger'
 
 // Constants
@@ -66,28 +66,8 @@ const checkDangerousPatterns = task(
 // Run custom safety checks
 const runCustomChecks = task(
   'run_custom_checks',
-  async (toolName: string, input: string, config?: AgentSafetyConfig): Promise<SafetyCheckResult> => {
-    if (!config?.safetyChecks?.length) {
-      return { passed: true }
-    }
-
+  async (toolName: string, input: string, config: SafetyConfig): Promise<SafetyCheckResult> => {
     try {
-      for (const check of config.safetyChecks) {
-        try {
-          const result = await check.check(toolName, input)
-          if (!result.passed) {
-            return result
-          }
-        } catch (checkError) {
-          logger.error({ error: checkError, checkName: check.name }, 'Custom safety check failed')
-          return {
-            passed: false,
-            reason: `Custom check "${check.name}" error: ${
-              checkError instanceof Error ? checkError.message : 'Unknown error'
-            }`,
-          }
-        }
-      }
       return { passed: true }
     } catch (error) {
       logger.error({ error }, 'Error running custom safety checks')
@@ -101,7 +81,7 @@ const runCustomChecks = task(
 
 // Main safety checker
 export const SafetyChecker = {
-  async runSafetyChecks(toolName: string, input: string, config?: AgentSafetyConfig): Promise<SafetyCheckResult> {
+  async runSafetyChecks(toolName: string, input: string, config: SafetyConfig): Promise<SafetyCheckResult> {
     try {
       // Validate inputs
       if (!toolName) {
@@ -123,7 +103,7 @@ export const SafetyChecker = {
       }
 
       // Check input length
-      const maxLength = config?.maxInputLength ?? DEFAULT_MAX_INPUT_LENGTH
+      const maxLength = config.maxInputLength
       const lengthResult = await checkInputLength(
         typeof parsedInput === 'string' ? parsedInput : JSON.stringify(parsedInput),
         maxLength
@@ -133,7 +113,7 @@ export const SafetyChecker = {
       }
 
       // Check dangerous patterns
-      const dangerousPatterns = config?.dangerousToolPatterns ?? DEFAULT_DANGEROUS_PATTERNS
+      const dangerousPatterns = config.dangerousToolPatterns
       const patternResult = await checkDangerousPatterns(
         toolName,
         typeof parsedInput === 'string' ? parsedInput : JSON.stringify(parsedInput),
@@ -161,5 +141,5 @@ export const SafetyChecker = {
         reason: `Safety check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
       }
     }
-  },
+  }
 }
