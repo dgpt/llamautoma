@@ -1,11 +1,42 @@
 {
   "name": "llamautoma",
-  "module": "index.ts",
+  "version": "0.1.0",
+  "description": "AI-powered automation server using LangChain.js and LangGraph.js",
   "type": "module",
-  "devDependencies": {
-    "@types/bun": "latest"
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run --watch src/index.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "build": "bun build src/index.ts --outdir dist",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write \"**/*.{ts,json,md}\""
   },
-  "peerDependencies": {
-    "typescript": "^5.0.0"
-  }
+  "dependencies": {
+    "@langchain/core": "^0.1.48",
+    "@langchain/langgraph": "^0.0.11",
+    "@langchain/langgraph-checkpoint": "^0.0.1",
+    "@langchain/ollama": "^0.0.10",
+    "pino": "^8.19.0",
+    "pino-pretty": "^10.3.1",
+    "uuid": "^9.0.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/uuid": "^9.0.8",
+    "@typescript-eslint/eslint-plugin": "^7.1.0",
+    "@typescript-eslint/parser": "^7.1.0",
+    "bun-types": "^1.0.29",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.1.3",
+    "prettier": "^3.2.5",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "author": "",
+  "license": "MIT"
 }
