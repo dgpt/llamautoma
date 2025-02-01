@@ -47,6 +47,12 @@ export interface LlamautomaSyncResponse extends LlamautomaResponse {
   }>
 }
 
+const getChatResponse = (messages: BaseMessage[]) => {
+  return `<response type="chat">
+    <content>${messages.map(msg => msg.content.toString()).join('\n')}</content>
+  </response>`
+}
+
 export class LlamautomaClient {
   private memoryPersistence: MemorySaver
   private defaultTools: Tool[]
@@ -144,22 +150,6 @@ export class LlamautomaClient {
     }
   }
 
-  private parseXMLResponse(content: string): { type: string; content: string } | null {
-    try {
-      const match = content.match(/<response type="([^"]+)">\s*<content>(.*?)<\/content>\s*<\/response>/s)
-      if (match) {
-        return {
-          type: match[1],
-          content: match[2].trim()
-        }
-      }
-      return null
-    } catch (error) {
-      logger.error({ error }, 'Failed to parse XML response')
-      return null
-    }
-  }
-
   private async *createMessageStream(stream: AsyncIterable<any>): AsyncIterableIterator<BaseMessage> {
     const iterator = stream[Symbol.asyncIterator]()
     let isDone = false
@@ -176,6 +166,7 @@ export class LlamautomaClient {
             const message = currentMessage.startsWith('<response') ?
               currentMessage :
               `<response type="chat"><content>${currentMessage}</content></response>`
+            logger.debug({ messageCount, content: message }, 'Yielding final message')
             yield new AIMessage(message)
           }
           break
@@ -204,6 +195,13 @@ export class LlamautomaClient {
               logger.debug({ messageCount, content: currentMessage }, 'Yielding complete XML message')
               messageCount++
               yield new AIMessage(currentMessage)
+              // For edit responses, append a final response to ensure completion
+              if (currentMessage.includes('<response type="edit">')) {
+                logger.debug('Appending final response after edit')
+                yield new AIMessage('<response type="final"><content>Edit complete</content></response>')
+                isDone = true
+                break
+              }
               currentMessage = ''
             }
           }
@@ -216,6 +214,13 @@ export class LlamautomaClient {
               logger.debug({ messageCount, content }, 'Processing direct message')
               messageCount++
               yield new AIMessage(content)
+              // For edit responses, append a final response to ensure completion
+              if (content.includes('<response type="edit">')) {
+                logger.debug('Appending final response after edit')
+                yield new AIMessage('<response type="final"><content>Edit complete</content></response>')
+                isDone = true
+                break
+              }
             }
           }
         }
@@ -224,7 +229,6 @@ export class LlamautomaClient {
       logger.error({ error }, 'Stream processing failed')
       yield new AIMessage(`<response type="error"><content>Error: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)
     } finally {
-      isDone = true
       if (iterator.return) {
         await iterator.return()
       }
@@ -236,47 +240,62 @@ export class LlamautomaClient {
   }
 
   async edit(instruction: string, file: string, options: LlamautomaChatOptions = {}): Promise<LlamautomaEditResponse> {
+    logger.debug('Editing file')
     const messages = [
       new HumanMessage(`File: ${file}\nInstruction: ${instruction}`)
     ]
-    logger.debug('Editing file', { messages })
     const result = await this.runAgent(messages, options)
     logger.debug('Edit result', { result })
 
-    // If no edit response is found, create a default one
-    if (!result.messages.some(msg => msg.content.toString().includes('<response type="edit">'))) {
-      const defaultEdit = `<response type="edit">
-        <file>${file}</file>
-        <changes>
-          <change type="insert">
-            <location>2</location>
-            <content>Goodbye World\n</content>
-          </change>
-        </changes>
-      </response>`
-      result.messages.push(new AIMessage(defaultEdit))
+    let edits: Array<{ file: string, changes: string[] }> = []
+
+    if (result.stream) {
+      logger.debug('Processing edit stream')
+      const processedMessages: BaseMessage[] = []
+
+      try {
+        for await (const message of result.stream) {
+          processedMessages.push(message)
+          const content = message.content.toString()
+          logger.debug('Processing message from stream', { content })
+
+          if (content.includes('<response type="edit">')) {
+            logger.debug('Found edit response', { content })
+            const fileMatch = content.match(/<file>(.*?)<\/file>/s)
+            const changes = Array.from(content.matchAll(/<change type="([^"]+)">\s*<location>(.*?)<\/location>\s*<content>(.*?)<\/content>\s*<\/change>/gs))
+              .map(match => ({
+                type: match[1],
+                location: match[2],
+                content: match[3]
+              }))
+
+            edits.push({
+              file: fileMatch ? fileMatch[1].trim() : file,
+              changes: changes.map(c => JSON.stringify(c))
+            })
+          }
+
+          // Break if we see a final or chat response after finding edits
+          if (edits.length > 0 && content.match(/<response type="(final|chat)">/)) {
+            logger.debug('Found completion response after edits', { content })
+            break
+          }
+        }
+      } catch (error) {
+        logger.error({ error }, 'Error processing edit stream')
+        throw error
+      } finally {
+        // Ensure stream is properly closed
+        if (result.stream.return) {
+          await result.stream.return()
+        }
+      }
+
+      // Update result messages with processed messages
+      result.messages = processedMessages
     }
 
-    const edits = result.messages
-      .filter(msg => {
-        const content = msg.content.toString()
-        return content.includes('<response type="edit">')
-      })
-      .map(msg => {
-        const content = msg.content.toString()
-        const fileMatch = content.match(/<file>(.*?)<\/file>/s)
-        const changes = Array.from(content.matchAll(/<change type="([^"]+)">\s*<location>(.*?)<\/location>\s*<content>(.*?)<\/content>\s*<\/change>/gs))
-          .map(match => ({
-            type: match[1],
-            location: match[2],
-            content: match[3]
-          }))
-        return {
-          file: fileMatch ? fileMatch[1].trim() : file,
-          changes: changes.map(c => JSON.stringify(c))
-        }
-      })
-
+    logger.debug('Processed edits', { editCount: edits.length, edits })
     return { ...result, edits }
   }
 
