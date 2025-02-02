@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, afterAll, beforeAll } from 'bun:test'
 import { logger } from '../src/utils/logger'
-import { Server } from '../src/server'
 
-// Track active model invocations
-const activeInvocations = new Set<string>()
+// Track active model invocations and their completion promises
+const activeInvocations = new Map<string, {
+  promise: Promise<void>,
+  resolve: () => void
+}>()
 let isTestEnvironment = false
 
 // Global beforeAll hook for test suite
 beforeAll(() => {
-  logger.trace('Initializing test suite')
   process.env.NODE_ENV = 'test'
   isTestEnvironment = true
   activeInvocations.clear()
@@ -16,13 +17,9 @@ beforeAll(() => {
 
 // Global afterAll hook for test suite
 afterAll(async () => {
-  logger.trace('Cleaning up test suite')
   if (activeInvocations.size > 0) {
-    logger.warn(`Force cleaning up ${activeInvocations.size} remaining invocations`)
     await modelInvocationManager.forceCleanup()
   }
-  // Unref the server instance
-  Server.unref()
   process.env.NODE_ENV = 'development'
   isTestEnvironment = false
 })
@@ -30,16 +27,13 @@ afterAll(async () => {
 // Global beforeEach hook
 beforeEach(() => {
   activeInvocations.clear()
-  logger.trace('Test initialized')
 })
 
 // Global afterEach hook
 afterEach(async () => {
   if (activeInvocations.size > 0) {
-    logger.warn(`Cleaning up ${activeInvocations.size} active invocations`)
     await modelInvocationManager.forceCleanup()
   }
-  logger.trace('Test cleaned up')
 })
 
 // Export utilities for tests to use
@@ -51,18 +45,9 @@ export const modelInvocationManager = {
   async waitForTurn(threadId: string): Promise<void> {
     if (!isTestEnvironment) return
 
-    let attempts = 0
-    const maxAttempts = 10
-    const delayMs = 100
-
-    while (activeInvocations.size > 0 && attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, delayMs))
-      attempts++
-    }
-
-    if (attempts >= maxAttempts) {
-      logger.warn(`Timed out waiting for turn on thread ${threadId}`)
-      await this.forceCleanup()
+    // Wait for any active invocations to complete
+    if (activeInvocations.size > 0) {
+      await Promise.all([...activeInvocations.values()].map(inv => inv.promise))
     }
   },
 
@@ -73,8 +58,17 @@ export const modelInvocationManager = {
   async startInvocation(threadId: string): Promise<void> {
     if (!isTestEnvironment) return
     await this.waitForTurn(threadId)
-    activeInvocations.add(threadId)
-    logger.trace(`Started invocation ${threadId}`)
+
+    // Create a new promise for this invocation
+    let resolveInvocation: () => void
+    const promise = new Promise<void>(resolve => {
+      resolveInvocation = resolve
+    })
+
+    activeInvocations.set(threadId, {
+      promise,
+      resolve: resolveInvocation!
+    })
   },
 
   /**
@@ -83,9 +77,10 @@ export const modelInvocationManager = {
    */
   completeInvocation(threadId: string): void {
     if (!isTestEnvironment) return
-    if (activeInvocations.has(threadId)) {
+    const invocation = activeInvocations.get(threadId)
+    if (invocation) {
+      invocation.resolve()
       activeInvocations.delete(threadId)
-      logger.trace(`Completed invocation ${threadId}`)
     }
   },
 
@@ -101,8 +96,12 @@ export const modelInvocationManager = {
    */
   async forceCleanup(): Promise<void> {
     if (!isTestEnvironment || activeInvocations.size === 0) return
+
+    // Resolve all pending invocations
+    for (const invocation of activeInvocations.values()) {
+      invocation.resolve()
+    }
     activeInvocations.clear()
-    logger.warn('Force cleaned up all invocations')
   },
 
   /**
@@ -111,21 +110,7 @@ export const modelInvocationManager = {
   async waitForInvocations(): Promise<void> {
     if (!isTestEnvironment || activeInvocations.size === 0) return
 
-    const invocations = Array.from(activeInvocations)
-    logger.trace(`Waiting for invocations: ${invocations.join(', ')}`)
-
-    let attempts = 0
-    const maxAttempts = 10
-    const delayMs = 100
-
-    while (activeInvocations.size > 0 && attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, delayMs))
-      attempts++
-    }
-
-    if (attempts >= maxAttempts) {
-      logger.warn('Timed out waiting for invocations to complete')
-      await this.forceCleanup()
-    }
+    // Wait for all active invocations to complete
+    await Promise.all([...activeInvocations.values()].map(inv => inv.promise))
   }
 }

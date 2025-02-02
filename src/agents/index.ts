@@ -414,6 +414,7 @@ export function createReActAgent(config: FunctionalReActConfig) {
     model: config.modelName || DEFAULT_AGENT_CONFIG.modelName,
     baseUrl: config.host || DEFAULT_AGENT_CONFIG.host
   })
+  logger.debug({ modelName: config.modelName, host: config.host }, 'Created chat model')
 
   // Validate chat model
   if (!chatModel.invoke || typeof chatModel.invoke !== 'function') {

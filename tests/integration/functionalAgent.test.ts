@@ -83,33 +83,22 @@ describe('Functional ReAct Agent Integration Tests', () => {
           await modelInvocationManager.startInvocation(state.threadId)
 
           try {
-            let cleanup: (() => void) | undefined
-            try {
-              const result = await Promise.race([
-                chat.call(state.messages),
-                new Promise<never>((_, reject) => {
-                  const timeout = setTimeout(() => reject(new Error('Chat model timeout')), 5000)
-                  cleanup = () => clearTimeout(timeout)
-                })
-              ])
-              modelResponse = result
-              logger.trace('Model response received')
+            const result = await chat.call(state.messages)
+            modelResponse = result
+            logger.trace('Model response received')
 
-              return {
-                ...state,
-                messages: [...state.messages, result],
-                status: 'end' as const,
-                modelResponse: result,
-                isFinalAnswer: true,
-                configurable: {
-                  thread_id: state.threadId,
-                  checkpoint_ns: 'test',
-                  [Symbol.toStringTag]: 'AgentConfigurable' as const,
-                  safetyConfig: DEFAULT_SAFETY_CONFIG
-                }
+            return {
+              ...state,
+              messages: [...state.messages, result],
+              status: 'end' as const,
+              modelResponse: result,
+              isFinalAnswer: true,
+              configurable: {
+                thread_id: state.threadId,
+                checkpoint_ns: 'test',
+                [Symbol.toStringTag]: 'AgentConfigurable' as const,
+                safetyConfig: DEFAULT_SAFETY_CONFIG
               }
-            } finally {
-              cleanup?.()
             }
           } finally {
             modelInvocationManager.completeInvocation(state.threadId)
@@ -161,30 +150,19 @@ describe('Functional ReAct Agent Integration Tests', () => {
           await modelInvocationManager.startInvocation(state.threadId)
 
           try {
-            let cleanup: (() => void) | undefined
-            try {
-              const result = await Promise.race([
-                testTool.invoke('test input'),
-                new Promise<never>((_, reject) => {
-                  const timeout = setTimeout(() => reject(new Error('Tool execution timeout')), 5000)
-                  cleanup = () => clearTimeout(timeout)
-                })
-              ])
-              logger.trace('Tool execution complete')
-              return {
-                ...state,
-                messages: [...state.messages, { role: 'assistant', content: result }],
-                status: 'end' as const,
-                modelResponse: { role: 'assistant', content: result },
-                isFinalAnswer: true,
-                configurable: {
-                  thread_id: state.threadId,
-                  checkpoint_ns: 'test',
-                  [Symbol.toStringTag]: 'AgentConfigurable' as const
-                }
+            const result = await testTool.invoke('test input')
+            logger.trace('Tool execution complete')
+            return {
+              ...state,
+              messages: [...state.messages, { role: 'assistant', content: result }],
+              status: 'end' as const,
+              modelResponse: { role: 'assistant', content: result },
+              isFinalAnswer: true,
+              configurable: {
+                thread_id: state.threadId,
+                checkpoint_ns: 'test',
+                [Symbol.toStringTag]: 'AgentConfigurable' as const
               }
-            } finally {
-              cleanup?.()
             }
           } finally {
             modelInvocationManager.completeInvocation(state.threadId)
@@ -224,54 +202,62 @@ describe('Functional ReAct Agent Integration Tests', () => {
       await modelInvocationManager.startInvocation(state.threadId)
 
       try {
-        let cleanup: (() => void) | undefined
-        try {
-          const result = await Promise.race([
-            chat.call(state.messages),
-            new Promise<never>((_, reject) => {
-              const timeout = setTimeout(() => reject(new Error('Chat model timeout')), 5000)
-              cleanup = () => clearTimeout(timeout)
-            })
-          ])
+        const result = await chat.call(state.messages)
 
-          if (!sharedMemory[state.threadId]) {
-            sharedMemory[state.threadId] = { messages: [] }
-          }
-          sharedMemory[state.threadId].messages = [...state.messages, result]
+        if (!sharedMemory[state.threadId]) {
+          sharedMemory[state.threadId] = { messages: [] }
+        }
+        sharedMemory[state.threadId].messages = [...state.messages, result]
 
-          return {
-            ...state,
-            messages: sharedMemory[state.threadId].messages,
-            status: 'end' as const,
-            modelResponse: result,
-            isFinalAnswer: true
-          }
-        } finally {
-          cleanup?.()
+        return {
+          ...state,
+          messages: sharedMemory[state.threadId].messages,
+          status: 'end' as const,
+          modelResponse: result,
+          isFinalAnswer: true
         }
       } finally {
         modelInvocationManager.completeInvocation(state.threadId)
       }
     }
 
-    try {
-      logger.trace(`Processing first thread ${threadId1}`)
-      const state1 = createInitialState(threadId1, [new HumanMessage('Remember that the sky is blue')])
-      const result1 = await processState(state1)
+    const agent = entrypoint(
+      {
+        checkpointer,
+        name: 'test_agent'
+      },
+      processState
+    )
 
-      expect(result1.messages.length).toBeGreaterThan(1)
-      expect(result1.status).toBe('end')
+    // First message
+    const result1 = await agent.invoke(
+      createInitialState(threadId1, [new HumanMessage('Remember that the sky is blue')]),
+      {
+        configurable: {
+          thread_id: threadId1,
+          checkpoint_ns: 'test',
+          [Symbol.toStringTag]: 'AgentConfigurable' as const
+        }
+      }
+    )
 
-      logger.trace(`Processing second thread ${threadId2}`)
-      const state2 = createInitialState(threadId2, [new HumanMessage('What color is the sky?')])
-      const result2 = await processState(state2)
+    expect(result1.messages.length).toBeGreaterThan(1)
+    expect(result1.status).toBe('end')
 
-      expect(result2.messages.length).toBeGreaterThan(1)
-      expect(result2.status).toBe('end')
-      expect(result2.messages[result2.messages.length - 1].content).toContain('blue')
-    } finally {
-      await modelInvocationManager.waitForInvocations()
-    }
-    logger.trace('Cross-thread test complete')
+    // Second message
+    const result2 = await agent.invoke(
+      createInitialState(threadId2, [new HumanMessage('What color is the sky?')]),
+      {
+        configurable: {
+          thread_id: threadId2,
+          checkpoint_ns: 'test',
+          [Symbol.toStringTag]: 'AgentConfigurable' as const
+        }
+      }
+    )
+
+    expect(result2.messages.length).toBeGreaterThan(1)
+    expect(result2.status).toBe('end')
+    expect(result2.messages[result2.messages.length - 1].content).toContain('blue')
   })
 })

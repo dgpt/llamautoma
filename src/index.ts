@@ -11,7 +11,13 @@ const handleChatRequest = async (body: any, agent: any) => {
   }
 
   // Process chat request
-  const result = await agent.chat(body.messages)
+  const result = await agent.invoke({
+    messages: body.messages,
+    configurable: {
+      thread_id: body.threadId,
+      checkpoint_ns: body.configurable?.checkpoint_ns || 'default'
+    }
+  })
   return result
 }
 
@@ -22,7 +28,13 @@ const handleToolRequest = async (body: any, agent: any) => {
   }
 
   // Process tool request
-  const result = await agent.executeTool(body.tool, body.args)
+  const result = await agent.invoke({
+    messages: [{ type: 'tool', name: body.tool, args: body.args }],
+    configurable: {
+      thread_id: body.threadId,
+      checkpoint_ns: body.configurable?.checkpoint_ns || 'default'
+    }
+  })
   return result
 }
 
@@ -32,7 +44,7 @@ const handleRequest = async (req: Request): Promise<Response> => {
 
   try {
     const url = new URL(req.url)
-    const path = url.pathname
+    const path = url.pathname.toLowerCase()
 
     // Validate request method
     if (req.method !== 'POST') {
@@ -86,27 +98,25 @@ const handleRequest = async (req: Request): Promise<Response> => {
 
     // Process request based on path
     try {
+      let result
       switch (path) {
         case '/chat':
-          const chatResult = await handleChatRequest(body, agent)
-          return new Response(JSON.stringify(chatResult), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
-          })
-
+          result = await handleChatRequest(body, agent)
+          break
         case '/tool':
-          const toolResult = await handleToolRequest(body, agent)
-          return new Response(JSON.stringify(toolResult), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
-          })
-
+          result = await handleToolRequest(body, agent)
+          break
         default:
           return new Response(JSON.stringify({ error: 'Not found' }), {
             status: 404,
             headers: { 'Content-Type': 'application/json' }
           })
       }
+
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
     } catch (error) {
       logger.error('Error processing request', {
         threadId,
