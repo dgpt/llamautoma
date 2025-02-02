@@ -1,66 +1,147 @@
-import { ChatOllama } from '@langchain/ollama'
-import { ReActAgent } from './agents/react/agent'
-import { MemoryManager } from './agents/react/memory/memoryManager'
-import { FileSystemTool } from './agents/react/tools/fileSystemTool'
-import { Server } from './server'
+import { v4 as uuidv4 } from 'uuid'
 import { logger } from './utils/logger'
-import { MemorySaver } from '@langchain/langgraph'
+import { createReActAgent } from './agents/react/agent'
+import { DEFAULT_AGENT_CONFIG } from './agents/react/types'
 
-async function main() {
+// Handler functions
+const handleChatRequest = async (body: any, agent: any) => {
+  // Validate chat request
+  if (!body.messages || !Array.isArray(body.messages)) {
+    throw new Error('Invalid chat request: messages array is required')
+  }
+
+  // Process chat request
+  const result = await agent.chat(body.messages)
+  return result
+}
+
+const handleToolRequest = async (body: any, agent: any) => {
+  // Validate tool request
+  if (!body.tool || typeof body.tool !== 'string' || !body.args) {
+    throw new Error('Invalid tool request: tool name and args are required')
+  }
+
+  // Process tool request
+  const result = await agent.executeTool(body.tool, body.args)
+  return result
+}
+
+const handleRequest = async (req: Request): Promise<Response> => {
+  const threadId = uuidv4()
+  logger.debug('Created new agent', { threadId })
+
   try {
-    // Initialize chat model
-    const chat = new ChatOllama({
-      model: 'qwen2.5-coder:7b',
-      baseUrl: process.env.OLLAMA_HOST || 'http://localhost:11434',
-    })
+    const url = new URL(req.url)
+    const path = url.pathname
 
-    // Initialize memory and tools
-    const memory = new MemoryManager()
-    const fileSystemTool = new FileSystemTool()
-    const memorySaver = new MemorySaver()
-
-    // Initialize agent
-    const agent = new ReActAgent({
-      chatModel: chat,
-      modelName: 'qwen2.5-coder:7b',
-      host: process.env.OLLAMA_HOST || 'http://localhost:11434',
-      tools: [fileSystemTool],
-      maxIterations: 30,
-      userInputTimeout: 36000,
-      memoryPersistence: memorySaver,
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-      maxEntries: 1000,
-      relevancyThreshold: 0.7,
-      safetyConfig: {
-        requireToolConfirmation: true,
-        requireToolFeedback: true,
-        maxInputLength: 10000,
-        dangerousToolPatterns: ['drop', 'truncate', 'exec', 'curl', 'wget', 'bash -c', 'rm  -rf /', 'zsh -c', 'sh -c'],
-      },
-    })
-
-    // Initialize and start server
-    const server = new Server({
-      agent,
-      memory,
-      port: parseInt(process.env.PORT || '3000', 10),
-    })
-
-    await server.start()
-
-    // Handle graceful shutdown
-    const signals = ['SIGTERM', 'SIGINT']
-    signals.forEach((signal) => {
-      process.on(signal, async () => {
-        logger.info(`Received ${signal}, shutting down...`)
-        await server.stop()
-        process.exit(0)
+    // Validate request method
+    if (req.method !== 'POST') {
+      return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+        status: 405,
+        headers: { 'Content-Type': 'application/json' }
       })
-    })
+    }
+
+    // Parse request body
+    let body
+    try {
+      body = await req.json()
+    } catch (error) {
+      logger.error('Failed to parse request body', { threadId, error })
+      return new Response(JSON.stringify({ error: 'Invalid JSON in request body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
+
+    // Create agent
+    let agent
+    try {
+      const configurable = {
+        thread_id: threadId,
+        checkpoint_ns: 'react_agent',
+        [Symbol.toStringTag]: 'AgentConfigurable' as const
+      }
+
+      agent = await createReActAgent({
+        modelName: DEFAULT_AGENT_CONFIG.modelName,
+        host: DEFAULT_AGENT_CONFIG.host,
+        threadId,
+        configurable,
+        maxIterations: DEFAULT_AGENT_CONFIG.maxIterations,
+        userInputTimeout: DEFAULT_AGENT_CONFIG.userInputTimeout,
+        safetyConfig: DEFAULT_AGENT_CONFIG.safetyConfig
+      })
+      logger.debug('Updated agent last access time', { threadId })
+    } catch (error) {
+      logger.error('Failed to create agent', { threadId, error })
+      return new Response(JSON.stringify({
+        error: 'Failed to initialize agent',
+        details: error instanceof Error ? error.message : String(error)
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
+
+    // Process request based on path
+    try {
+      switch (path) {
+        case '/chat':
+          const chatResult = await handleChatRequest(body, agent)
+          return new Response(JSON.stringify(chatResult), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          })
+
+        case '/tool':
+          const toolResult = await handleToolRequest(body, agent)
+          return new Response(JSON.stringify(toolResult), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          })
+
+        default:
+          return new Response(JSON.stringify({ error: 'Not found' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' }
+          })
+      }
+    } catch (error) {
+      logger.error('Error processing request', {
+        threadId,
+        path,
+        error: error instanceof Error ? {
+          name: error.name,
+          message: error.message,
+          stack: error.stack
+        } : error
+      })
+      return new Response(JSON.stringify({
+        error: 'Request processing failed',
+        details: error instanceof Error ? error.message : String(error)
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
   } catch (error) {
-    logger.error('Failed to start server:', error)
-    process.exit(1)
+    logger.error('Unexpected error', {
+      threadId,
+      error: error instanceof Error ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      } : error
+    })
+    return new Response(JSON.stringify({
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : String(error)
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    })
   }
 }
 
-main()
+export default { port: 3000, fetch: async (req: Request) => handleRequest(req) }

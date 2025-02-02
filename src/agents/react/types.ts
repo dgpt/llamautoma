@@ -1,5 +1,4 @@
-import { BaseMessage, MessageContent } from '@langchain/core/messages'
-import { ChatOllama } from '@langchain/ollama'
+import { BaseMessage } from '@langchain/core/messages'
 import { MemorySaver } from '@langchain/langgraph'
 import { Tool } from '@langchain/core/tools'
 import { RunnableConfig } from '@langchain/core/runnables'
@@ -7,33 +6,52 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { SafetyConfig } from '../../types/agent'
 
 /**
+ * Default configuration values for the ReAct Agent
+ */
+export const DEFAULT_AGENT_CONFIG = {
+  modelName: 'qwen2.5-coder:7b',
+  host: 'http://localhost:11434',
+  maxIterations: 10,
+  userInputTimeout: 30000,
+  maxAge: 24 * 60 * 60 * 1000, // 24 hours
+  maxEntries: 1000,
+  relevancyThreshold: 0.7,
+  safetyConfig: {
+    requireToolConfirmation: true,
+    requireToolFeedback: true,
+    maxInputLength: 8192,
+    dangerousToolPatterns: [] as string[]
+  } as const
+} as const
+
+/**
  * Configuration for the ReAct Agent
  */
 export interface ReActAgentConfig {
-  /** Name of the Ollama model to use (default: qwen2.5-coder:7b) */
+  /** Name of the Ollama model to use */
   modelName?: string
-  /** Host URL for the Ollama server (default: http://localhost:8000) */
+  /** Host URL for the Ollama server */
   host?: string
-  /** Available tools for the agent */
-  tools: Tool[]
-  /** Maximum number of iterations before forced completion (default: 10) */
+  /** Maximum number of iterations before forced completion */
   maxIterations?: number
   /** Unique identifier for the agent thread */
-  threadId?: string
-  /** Optional pre-configured chat model */
-  chatModel: BaseChatModel
-  /** Optional memory persistence configuration */
-  memoryPersistence?: MemorySaver
-  /** Timeout for user input in milliseconds (default: 5000) */
+  threadId: string
+  /** Chat model to use */
+  chatModel?: BaseChatModel
+  /** Memory persistence configuration */
+  memoryPersistence: MemorySaver
+  /** Timeout for user input in milliseconds */
   userInputTimeout?: number
-  /** Optional safety configuration */
+  /** Safety configuration */
   safetyConfig?: SafetyConfig
-  /** Maximum age of memory entries in milliseconds (default: 24 hours) */
+  /** Maximum age of memory entries in milliseconds */
   maxAge?: number
-  /** Maximum number of memory entries to keep (default: 1000) */
+  /** Maximum number of memory entries to keep */
   maxEntries?: number
-  /** Threshold for memory relevancy (default: 0.7) */
+  /** Threshold for memory relevancy */
   relevancyThreshold?: number
+  /** Configurable parameters */
+  configurable: Required<RunnableConfig>['configurable']
 }
 
 /**

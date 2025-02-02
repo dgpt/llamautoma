@@ -1,6 +1,6 @@
 [test]
 coverage = true
-logLevel = "debug"
+preload = ['./tests/setup.ts']
 
 [define]
 "process.env.LOG_LEVEL" = "'debug'"

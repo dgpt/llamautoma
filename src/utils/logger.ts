@@ -14,6 +14,8 @@ export const logger = pino({
       levelFirst: true,
     },
   },
+  edgeLimit: 2,
+  depthLimit: 2,
   formatters: {
     level: (label) => {
       return { level: label.toUpperCase() }

@@ -1,26 +1,23 @@
 import { z } from 'zod'
 import { BaseReActTool } from './baseTool'
-import { FileSystemSync } from '../../../utils/fs'
 
+/**
+ * Tool for interacting with the file system
+ */
 export class FileSystemTool extends BaseReActTool {
-  name = 'fileSystem'
-  description = 'Tool for interacting with the file system'
-  fs: FileSystemSync
+  name = 'filesystem'
+  description = 'Tool for reading, writing, and manipulating files and directories'
 
-  constructor() {
-    super()
-    this.fs = new FileSystemSync()
-  }
-
-  protected transformInput(input: string): string | undefined {
+  public transformInput(input: string): string | undefined {
     try {
+      const parsed = JSON.parse(input)
       const schema = z.object({
-        action: z.enum(['readFile', 'writeFile', 'listFiles', 'deleteFile']),
+        operation: z.enum(['read', 'write', 'delete', 'list', 'exists']),
         path: z.string(),
-        content: z.string().optional(),
+        content: z.string().optional()
       })
 
-      const result = schema.safeParse(JSON.parse(input))
+      const result = schema.safeParse(parsed)
       if (!result.success) {
         return undefined
       }
@@ -32,24 +29,32 @@ export class FileSystemTool extends BaseReActTool {
   }
 
   protected async execute(input: string): Promise<string> {
-    const args = JSON.parse(input)
-    switch (args.action) {
-      case 'readFile':
-        return await this.fs.readFile(args.path)
-      case 'writeFile':
-        if (!args.content) {
-          throw new Error('Content is required for writeFile')
-        }
-        await this.fs.writeFile(args.path, args.content)
-        return `File ${args.path} written successfully`
-      case 'listFiles':
-        const files = await this.fs.listFiles(args.path)
-        return JSON.stringify(files)
-      case 'deleteFile':
-        await this.fs.deleteFile(args.path)
-        return `File ${args.path} deleted successfully`
-      default:
-        throw new Error(`Unknown action: ${args.action}`)
+    const { operation, path, content } = JSON.parse(input)
+
+    // This is just a stub - actual implementation will be handled by the client
+    const response: {
+      success: boolean
+      operation: string
+      path: string
+      content?: string
+      requiresConfirmation: boolean
+      error?: string
+    } = {
+      success: false,
+      operation,
+      path,
+      content,
+      requiresConfirmation: true,
+      error: 'Operation not implemented by client'
     }
+
+    // For exists operation, we can return a default response
+    if (operation === 'exists') {
+      response.success = true
+      delete response.error
+      response.requiresConfirmation = false
+    }
+
+    return JSON.stringify(response)
   }
 }

@@ -5,13 +5,14 @@ import { createReActAgent } from './agents/react/agent'
 import { Tool } from '@langchain/core/tools'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { RunnableConfig } from '@langchain/core/runnables'
+import { ChatOllama } from '@langchain/ollama'
+import { DEFAULT_AGENT_CONFIG } from './agents/react/types'
 
 export interface LlamautomaChatOptions {
   stream?: boolean
   threadId?: string
   modelName?: string
   host?: string
-  tools?: Tool[]
   configurable?: {
     thread_id?: string
     checkpoint_ns?: string
@@ -47,19 +48,11 @@ export interface LlamautomaSyncResponse extends LlamautomaResponse {
   }>
 }
 
-const getChatResponse = (messages: BaseMessage[]) => {
-  return `<response type="chat">
-    <content>${messages.map(msg => msg.content.toString()).join('\n')}</content>
-  </response>`
-}
-
 export class LlamautomaClient {
   private memoryPersistence: MemorySaver
-  private defaultTools: Tool[]
 
-  constructor(defaultTools: Tool[] = []) {
+  constructor() {
     this.memoryPersistence = new MemorySaver()
-    this.defaultTools = defaultTools
   }
 
   private createAgent(options: LlamautomaChatOptions = {}) {
@@ -77,28 +70,28 @@ export class LlamautomaClient {
       thread_id: threadId // Ensure thread_id is not overridden
     }
 
+    const chatModel = new ChatOllama({
+      model: options.modelName || DEFAULT_AGENT_CONFIG.modelName,
+      baseUrl: options.host || DEFAULT_AGENT_CONFIG.host
+    })
+
     return createReActAgent({
-      modelName: options.modelName || 'qwen2.5-coder:7b',
-      host: options.host || 'http://localhost:11434',
-      tools: options.tools || this.defaultTools,
+      modelName: options.modelName || DEFAULT_AGENT_CONFIG.modelName,
+      host: options.host || DEFAULT_AGENT_CONFIG.host,
       threadId,
+      maxIterations: DEFAULT_AGENT_CONFIG.maxIterations,
       memoryPersistence: this.memoryPersistence,
-      maxIterations: 10,
-      userInputTimeout: 300000,
-      safetyConfig: {
-        requireToolConfirmation: true,
-        requireToolFeedback: true,
-        maxInputLength: 8192,
-        dangerousToolPatterns: []
-      },
-      configurable
+      userInputTimeout: DEFAULT_AGENT_CONFIG.userInputTimeout,
+      configurable,
+      chatModel,
+      safetyConfig: DEFAULT_AGENT_CONFIG.safetyConfig
     })
   }
 
   private async runAgent(messages: BaseMessage[], options: LlamautomaChatOptions = {}): Promise<LlamautomaResponse> {
     try {
       const threadId = options.threadId || uuidv4()
-      logger.debug({ threadId }, 'Running agent');
+      logger.debug({ threadId }, 'Running agent')
 
       // Create a properly structured configurable object
       const configurable = {
@@ -124,6 +117,12 @@ export class LlamautomaClient {
 
       logger.debug('Agent created', { agent })
 
+      // Add initial system message if not present
+      if (!messages.some(m => m instanceof SystemMessage)) {
+        messages.unshift(new SystemMessage('You are a helpful AI assistant.'))
+      }
+
+      logger.debug('Creating agent stream')
       const stream = agent.streamEvents({
         messages,
         configurable: runConfig.configurable
@@ -131,104 +130,221 @@ export class LlamautomaClient {
         version: 'v2',
         encoding: 'text/event-stream',
         configurable: runConfig.configurable
-      });
-      logger.debug('Stream created from agent events');
+      })
+      logger.debug('Stream created from agent events')
+
+      // Create an async generator to process the stream
+      const messageStream = this.createMessageStream(stream)
+
+      // Get the first message
+      const firstResult = await messageStream.next()
+      const initialMessages = firstResult.value ? [firstResult.value] : []
+      logger.debug({ hasFirstMessage: !!firstResult.value }, 'Initial message processed')
+
+      // If we have no initial message, create a default one
+      if (!initialMessages.length) {
+        const defaultMessage = new AIMessage('<response type="chat"><content>I am ready to help.</content></response>')
+        initialMessages.push(defaultMessage)
+      }
 
       return {
         status: 'success',
-        messages: [],
+        messages: initialMessages,
         threadId,
-        stream: this.createMessageStream(stream)
+        stream: messageStream
       }
     } catch (error) {
       logger.error({ error }, 'Agent execution failed')
       return {
         status: 'error',
-        messages: [new AIMessage(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`)],
+        messages: [new AIMessage(`<response type="error"><content>Error: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)],
         threadId: options.threadId || uuidv4()
       }
     }
   }
 
   private async *createMessageStream(stream: AsyncIterable<any>): AsyncIterableIterator<BaseMessage> {
+    logger.trace('Initializing message stream')
     const iterator = stream[Symbol.asyncIterator]()
-    let isDone = false
     let messageCount = 0
     let currentMessage = ''
+    let hasYieldedMessage = false
+    let emptyChunkCount = 0
+    const MAX_EMPTY_CHUNKS = 3
 
     try {
-      while (!isDone) {
+      logger.trace('Starting stream processing')
+      while (true) {
         const { value, done } = await iterator.next()
-        if (done) {
-          isDone = true
-          if (currentMessage) {
-            // Ensure final message is XML-formatted
-            const message = currentMessage.startsWith('<response') ?
-              currentMessage :
-              `<response type="chat"><content>${currentMessage}</content></response>`
-            logger.debug({ messageCount, content: message }, 'Yielding final message')
-            yield new AIMessage(message)
-          }
+
+        // Reset empty chunk count if we get a value
+        if (value) {
+          emptyChunkCount = 0
+        } else {
+          emptyChunkCount++
+        }
+
+        // Only break if we've hit max empty chunks AND we haven't yielded any messages
+        if ((done || emptyChunkCount >= MAX_EMPTY_CHUNKS) && !hasYieldedMessage) {
+          logger.trace('No messages found, sending default response')
+          messageCount++
+          yield new AIMessage('<response type="chat"><content>I am ready to help.</content></response>')
+          hasYieldedMessage = true
           break
+        }
+
+        // Break if done and we've yielded at least one message
+        if (done && hasYieldedMessage) {
+          break
+        }
+
+        if (!value) {
+          continue
         }
 
         let decodedValue = value
         if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+          logger.trace(`Decoding binary chunk (${value.byteLength} bytes)`)
           const decoder = new TextDecoder()
           decodedValue = decoder.decode(value)
-          const match = decodedValue.match(/data: ({.*})/s)
-          if (match) {
-            try {
-              decodedValue = JSON.parse(match[1])
-            } catch (e) {
-              logger.error({ error: e }, 'Failed to parse SSE data')
-            }
+        }
+
+        // Try to parse as SSE data
+        const sseMatch = typeof decodedValue === 'string' ? decodedValue.match(/data: ({.*})/s) : null
+        if (sseMatch) {
+          try {
+            decodedValue = JSON.parse(sseMatch[1])
+          } catch (e) {
+            logger.error('Failed to parse SSE data')
           }
         }
 
-        if (decodedValue?.event === 'on_chat_model_stream' && decodedValue?.data?.chunk) {
-          const chunk = decodedValue.data.chunk
-          if (chunk.kwargs?.content) {
-            currentMessage += chunk.kwargs.content
-            // If we see a complete XML response, yield it
-            if (currentMessage.includes('</response>')) {
-              logger.debug({ messageCount, content: currentMessage }, 'Yielding complete XML message')
-              messageCount++
-              yield new AIMessage(currentMessage)
-              // For edit responses, append a final response to ensure completion
-              if (currentMessage.includes('<response type="edit">')) {
-                logger.debug('Appending final response after edit')
-                yield new AIMessage('<response type="final"><content>Edit complete</content></response>')
-                isDone = true
-                break
+        // Handle messages array
+        if (decodedValue?.messages?.length > 0) {
+          logger.trace(`Processing message batch (${decodedValue.messages.length})`)
+
+          for (const msg of decodedValue.messages) {
+            if (!msg.content) continue
+
+            const content = msg.content.toString()
+            // Format raw objects as XML
+            let xmlContent
+            if (content.match(/<response.*?<\/response>/s)) {
+              xmlContent = content
+            } else {
+              // Try to parse event data first
+              let responseType = 'chat'
+              try {
+                const eventData = typeof content === 'string' ? JSON.parse(content) : content
+                if (eventData.event) {
+                  switch (eventData.event) {
+                    case 'on_tool_start':
+                    case 'on_tool_end':
+                      responseType = 'tool'
+                      break
+                    case 'on_chain_start':
+                      if (eventData.name === 'react_agent') {
+                        responseType = 'thought'
+                      }
+                      break
+                    case 'on_chain_end':
+                      if (eventData.name === 'react_agent') {
+                        responseType = 'final'
+                      }
+                      break
+                  }
+                }
+              } catch (e) {
+                // If event parsing fails, try content-based detection
+                if (content.includes('Tool execution requires confirmation') || content.includes('Tool:') || content.includes('Action:')) {
+                  responseType = 'tool'
+                } else if (content.includes('Edit file') || content.includes('Editing file') || content.includes('File edit:')) {
+                  responseType = 'edit'
+                } else if (content.includes('Create file') || content.includes('Creating file') || content.includes('New file:')) {
+                  responseType = 'compose'
+                } else if (content.includes('Directory:') || content.includes('Syncing') || content.includes('Sync:')) {
+                  responseType = 'sync'
+                } else if (content.includes('Thought:') || content.includes('Thinking:')) {
+                  responseType = 'thought'
+                } else if (content.includes('Final Answer:') || content.includes('Complete:')) {
+                  responseType = 'final'
+                }
               }
-              currentMessage = ''
+              xmlContent = `<response type="${responseType}"><content>${typeof content === 'object' ? JSON.stringify(content) : content}</content></response>`
+            }
+
+            // Check for complete XML messages
+            const xmlMatches = xmlContent.match(/<response.*?<\/response>/gs)
+            if (xmlMatches) {
+              for (const match of xmlMatches) {
+                logger.trace(`Processing message ${messageCount + 1} (type: ${match.match(/type="([^"]+)"/)?.[1] || 'unknown'})`)
+                messageCount++
+                yield new AIMessage(match)
+                hasYieldedMessage = true
+
+                // Only break on final/chat if we've seen multiple messages
+                const type = match.match(/type="([^"]+)"/)?.[1]
+                if (messageCount > 1 && (type === 'final' || type === 'chat')) {
+                  logger.trace(`Found completion response after ${messageCount} messages - type: ${type}`)
+                  return
+                }
+              }
             }
           }
-        } else if (decodedValue?.messages?.length > 0) {
-          for (const msg of decodedValue.messages) {
-            if (msg.content) {
-              const content = msg.content.toString().startsWith('<response') ?
-                msg.content :
-                `<response type="chat"><content>${msg.content}</content></response>`
-              logger.debug({ messageCount, content }, 'Processing direct message')
+        } else {
+          // Handle raw value
+          const content = decodedValue?.toString() || ''
+          if (!content) continue
+
+          // Format raw content as XML
+          let xmlContent
+          if (content.match(/<response.*?<\/response>/s)) {
+            xmlContent = content
+          } else if (typeof decodedValue === 'object') {
+            xmlContent = `<response type="chat"><content>${JSON.stringify(decodedValue)}</content></response>`
+          } else {
+            // Try to extract response type from content
+            let responseType = 'chat'
+            if (content.includes('Tool execution requires confirmation') || content.includes('Tool:') || content.includes('Action:')) {
+              responseType = 'tool'
+            } else if (content.includes('Edit file') || content.includes('Editing file') || content.includes('File edit:')) {
+              responseType = 'edit'
+            } else if (content.includes('Create file') || content.includes('Creating file') || content.includes('New file:')) {
+              responseType = 'compose'
+            } else if (content.includes('Directory:') || content.includes('Syncing') || content.includes('Sync:')) {
+              responseType = 'sync'
+            } else if (content.includes('Thought:') || content.includes('Thinking:')) {
+              responseType = 'thought'
+            } else if (content.includes('Final Answer:') || content.includes('Complete:')) {
+              responseType = 'final'
+            }
+            xmlContent = `<response type="${responseType}"><content>${content}</content></response>`
+          }
+
+          // Check for complete XML messages
+          const xmlMatches = xmlContent.match(/<response.*?<\/response>/gs)
+          if (xmlMatches) {
+            for (const match of xmlMatches) {
+              logger.trace(`Processing message ${messageCount + 1} (type: ${match.match(/type="([^"]+)"/)?.[1] || 'unknown'})`)
               messageCount++
-              yield new AIMessage(content)
-              // For edit responses, append a final response to ensure completion
-              if (content.includes('<response type="edit">')) {
-                logger.debug('Appending final response after edit')
-                yield new AIMessage('<response type="final"><content>Edit complete</content></response>')
-                isDone = true
-                break
+              yield new AIMessage(match)
+              hasYieldedMessage = true
+
+              // Only break on final/chat if we've seen multiple messages
+              const type = match.match(/type="([^"]+)"/)?.[1]
+              if (messageCount > 1 && (type === 'final' || type === 'chat')) {
+                logger.trace(`Found completion response after ${messageCount} messages - type: ${type}`)
+                return
               }
             }
           }
         }
       }
     } catch (error) {
-      logger.error({ error }, 'Stream processing failed')
-      yield new AIMessage(`<response type="error"><content>Error: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)
+      logger.error(`Stream error: ${error?.constructor?.name}`)
+      throw error
     } finally {
+      // Ensure iterator is properly closed
       if (iterator.return) {
         await iterator.return()
       }
@@ -280,8 +396,8 @@ export class LlamautomaClient {
             logger.debug('Found completion response after edits', { content })
             break
           }
-        }
-      } catch (error) {
+      }
+    } catch (error) {
         logger.error({ error }, 'Error processing edit stream')
         throw error
       } finally {

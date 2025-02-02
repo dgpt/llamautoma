@@ -1,70 +1,112 @@
 import { expect, test, describe, beforeAll, afterAll } from 'bun:test'
-import { Server } from '../../src/server'
 import { v4 as uuidv4 } from 'uuid'
 import { DynamicTool } from '@langchain/core/tools'
 import { logger } from '../../src/utils/logger'
+import server from 'src/'
+
+const readStreamWithTimeout = async (reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> => {
+  try {
+    const result = await reader.read()
+    if (!result || result.done) {
+      return ''
+    }
+
+    const value = result.value as Uint8Array
+    const text = new TextDecoder().decode(value)
+
+    // Only return actual SSE data lines
+    const lines = text.split('\n')
+    const dataLines = lines
+      .filter(line => line.startsWith('data: '))
+      .map(line => line.slice(6)) // Remove 'data: ' prefix
+
+    return dataLines.join('\n')
+  } catch (error) {
+    logger.error(`Stream read error: ${error?.constructor.name}`)
+    throw error
+  }
+}
 
 describe('Server Integration Tests', () => {
-  let server: Server
-
   beforeAll(async () => {
-    logger.debug('Starting server for tests')
-    server = new Server({
-      port: 3001,
-      modelName: 'qwen2.5-coder:1.5b',
-      host: 'http://localhost:11434',
-      tools: []
-    })
-    await server.start()
-    logger.debug('Server started')
+    process.env.NODE_ENV = 'test'
+    logger.trace('Starting server for tests')
+    logger.trace('Server started')
   })
 
   afterAll(async () => {
-    logger.debug('Stopping server')
-    await server.stop()
-    logger.debug('Server stopped')
+    logger.trace('Stopping server')
+    process.env.NODE_ENV = 'development'
+    logger.trace('Server stopped')
   })
 
   test('should handle chat endpoint', async () => {
     const threadId = uuidv4()
-    logger.debug({ threadId }, 'Starting chat endpoint test')
+    logger.trace(`Starting chat endpoint test: ${threadId}`)
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
 
-    const response = await fetch('http://localhost:3001/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'user', content: 'What is TypeScript?' }
-        ],
-        threadId
-      })
-    })
-    logger.debug({ status: response.status }, 'Chat response received')
+    try {
+      const response = await server.fetch(new Request('http://localhost:3001', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'chat',
+          messages: [
+            { role: 'user', content: 'What is TypeScript?' }
+          ],
+          threadId,
+          modelName: 'qwen2.5-coder:1.5b',
+          host: 'http://localhost:11434',
+          safetyConfig: {
+            requireToolConfirmation: false,
+            requireToolFeedback: false,
+            maxInputLength: 8192,
+            dangerousToolPatterns: []
+          }
+        })
+      }))
 
-    expect(response.status).toBe(200)
-    expect(response.headers.get('content-type')).toBe('text/event-stream')
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('text/event-stream')
 
-    const reader = response.body?.getReader()
-    if (reader) {
-      logger.debug('Reading response stream')
-      const { value } = await reader.read()
-      const text = new TextDecoder().decode(value)
-      expect(text).toContain('data:')
-      await reader.cancel()
-      logger.debug('Stream reading complete')
+      reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('No response body reader available')
+      }
+
+      let foundResponse = false
+      while (!foundResponse) {
+        const text = await readStreamWithTimeout(reader)
+        if (!text) continue
+
+        try {
+          const data = JSON.parse(text)
+          if (data.event === 'on_chain_end' || data.event === 'on_llm_end') {
+            foundResponse = true
+            break
+          }
+        } catch (e) {
+          continue
+        }
+      }
+
+      expect(foundResponse).toBe(true)
+    } finally {
+      if (reader) {
+        await reader.cancel()
+      }
     }
-    logger.debug('Chat endpoint test complete')
   })
 
   test('should handle tool registration and execution', async () => {
-    logger.debug('Starting tool registration test')
     const testTool = new DynamicTool({
       name: 'test-tool',
       description: 'A test tool',
       func: async (input: string) => `Processed: ${input}`
     })
 
-    const registrationResponse = await fetch('http://localhost:3001/tools', {
+    // Register tool first
+    const registrationResponse = await server.fetch(new Request('http://localhost:3001', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -79,91 +121,171 @@ describe('Server Integration Tests', () => {
           required: ['input']
         }
       })
-    })
-    logger.debug({ status: registrationResponse.status }, 'Tool registration response received')
+    }))
 
     expect(registrationResponse.status).toBe(200)
     const registration = await registrationResponse.json()
     expect(registration.success).toBe(true)
     expect(registration.toolId).toBeDefined()
-    logger.debug({ toolId: registration.toolId }, 'Tool registered')
 
+    // Execute tool
     const threadId = uuidv4()
-    logger.debug({ threadId }, 'Starting tool execution')
-    const executionResponse = await fetch('http://localhost:3001/tools/execute', {
+    const executionResponse = await server.fetch(new Request('http://localhost:3001', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        toolId: registration.toolId,
-        input: { input: 'test value' },
-        threadId
+        type: 'chat',
+        messages: [
+          { role: 'user', content: 'Use the test-tool with input "test input"' }
+        ],
+        threadId,
+        modelName: 'qwen2.5-coder:1.5b',
+        host: 'http://localhost:11434',
+        safetyConfig: {
+          requireToolConfirmation: false,
+          requireToolFeedback: false,
+          maxInputLength: 8192,
+          dangerousToolPatterns: []
+        }
       })
-    })
-    logger.debug({ status: executionResponse.status }, 'Tool execution response received')
+    }))
 
     expect(executionResponse.status).toBe(200)
     const reader = executionResponse.body?.getReader()
-    if (reader) {
-      logger.debug('Reading execution response stream')
-      const { value } = await reader.read()
-      const text = new TextDecoder().decode(value)
-      expect(text).toContain('Processed:')
-      await reader.cancel()
-      logger.debug('Execution stream reading complete')
+    if (!reader) {
+      throw new Error('No response body reader available')
     }
-    logger.debug('Tool registration and execution test complete')
+
+    try {
+      let foundToolResponse = false
+      let foundFinalResponse = false
+      let foundProcessedOutput = false
+
+      while (!foundToolResponse || !foundFinalResponse || !foundProcessedOutput) {
+        const text = await readStreamWithTimeout(reader)
+        if (!text) continue
+
+        try {
+          const data = JSON.parse(text)
+
+          if (data.event === 'on_tool_start') {
+            foundToolResponse = true
+          }
+
+          if (data.event === 'on_tool_end' && data.data?.output?.includes('Processed: test input')) {
+            foundProcessedOutput = true
+          }
+
+          if (data.event === 'on_chain_end' || data.event === 'on_llm_end') {
+            foundFinalResponse = true
+            break
+          }
+        } catch (e) {
+          continue
+        }
+      }
+
+      expect(foundToolResponse).toBe(true)
+      expect(foundProcessedOutput).toBe(true)
+      expect(foundFinalResponse).toBe(true)
+    } finally {
+      await reader.cancel()
+    }
   })
 
   test('should handle cross-thread memory persistence', async () => {
     const threadId1 = uuidv4()
     const threadId2 = uuidv4()
-    logger.debug({ threadId1, threadId2 }, 'Starting cross-thread test')
 
-    logger.debug('Sending first message')
-    const response1 = await fetch('http://localhost:3001/chat', {
+    // First message
+    const response1 = await server.fetch(new Request('http://localhost:3001', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        type: 'chat',
         messages: [
           { role: 'user', content: 'Remember that the sky is blue.' }
         ],
-        threadId: threadId1
+        threadId: threadId1,
+        modelName: 'qwen2.5-coder:1.5b',
+        host: 'http://localhost:11434',
+        safetyConfig: {
+          requireToolConfirmation: false,
+          requireToolFeedback: false,
+          maxInputLength: 8192,
+          dangerousToolPatterns: []
+        }
       })
-    })
-    logger.debug({ status: response1.status }, 'First message response received')
+    }))
 
     expect(response1.status).toBe(200)
     const reader1 = response1.body?.getReader()
     if (reader1) {
-      logger.debug('Reading first response stream')
-      await reader1.read()
-      await reader1.cancel()
-      logger.debug('First stream reading complete')
+      try {
+        let foundFirstResponse = false
+        while (!foundFirstResponse) {
+          const text = await readStreamWithTimeout(reader1)
+          if (!text) continue
+
+          try {
+            const data = JSON.parse(text)
+            if (data.event === 'on_chain_end' || data.event === 'on_llm_end') {
+              foundFirstResponse = true
+              break
+            }
+          } catch (e) {
+            continue
+          }
+        }
+      } finally {
+        await reader1.cancel()
+      }
     }
 
-    logger.debug('Sending second message')
-    const response2 = await fetch('http://localhost:3001/chat', {
+    // Second message
+    const response2 = await server.fetch(new Request('http://localhost:3001', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        type: 'chat',
         messages: [
           { role: 'user', content: 'What color is the sky?' }
         ],
-        threadId: threadId2
+        threadId: threadId2,
+        modelName: 'qwen2.5-coder:1.5b',
+        host: 'http://localhost:11434',
+        safetyConfig: {
+          requireToolConfirmation: false,
+          requireToolFeedback: false,
+          maxInputLength: 8192,
+          dangerousToolPatterns: []
+        }
       })
-    })
-    logger.debug({ status: response2.status }, 'Second message response received')
+    }))
 
     expect(response2.status).toBe(200)
     const reader2 = response2.body?.getReader()
     if (reader2) {
-      logger.debug('Reading second response stream')
-      const { value } = await reader2.read()
-      const text = new TextDecoder().decode(value)
-      expect(text).toContain('blue')
-      await reader2.cancel()
-      logger.debug('Second stream reading complete')
+      try {
+        let foundBlueResponse = false
+        while (!foundBlueResponse) {
+          const text = await readStreamWithTimeout(reader2)
+          if (!text) continue
+
+          try {
+            const data = JSON.parse(text)
+            if ((data.event === 'on_chain_end' || data.event === 'on_llm_end') &&
+                data.data?.output?.includes('blue')) {
+              foundBlueResponse = true
+              break
+            }
+          } catch (e) {
+            continue
+          }
+        }
+      } finally {
+        await reader2.cancel()
+      }
     }
-    logger.debug('Cross-thread test complete')
   })
 })
