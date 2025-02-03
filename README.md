@@ -1,6 +1,6 @@
 # Llamautoma
 
-AI-powered automation server using LangChain.js, LangGraph.js, and Ollama. This server is part of the coc-llama project, providing AI-assisted code generation and editing features through a streaming API.
+AI-powered automation server using LangChain.js, LangGraph.js, and Ollama. This server is part of the coc-llamautoma project, providing AI-assisted code generation and editing features through a streaming API.
 
 ## Features
 
