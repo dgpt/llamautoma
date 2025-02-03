@@ -2,51 +2,101 @@ import { v4 as uuidv4 } from 'uuid'
 import { logger } from '@/logger'
 import { createReActAgent } from '@/agents'
 import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
+import { z } from 'zod'
 
-// Handler functions
-const handleChatRequest = async (body: any, agent: any) => {
-  // Validate chat request
-  if (!body.messages || !Array.isArray(body.messages)) {
-    throw new Error('Invalid chat request: messages array is required')
+// Request validation schemas
+const ChatRequestSchema = z.object({
+  messages: z.array(
+    z.object({
+      role: z.string(),
+      content: z.string(),
+    })
+  ),
+  threadId: z.string().optional(),
+  modelName: z.string().optional(),
+  host: z.string().optional(),
+  safetyConfig: z
+    .object({
+      requireToolConfirmation: z.boolean().optional(),
+      requireToolFeedback: z.boolean().optional(),
+      maxInputLength: z.number().optional(),
+      dangerousToolPatterns: z.array(z.string()).optional(),
+    })
+    .optional(),
+  configurable: z
+    .object({
+      checkpoint_ns: z.string().optional(),
+    })
+    .optional(),
+})
+
+const ToolRequestSchema = z.object({
+  name: z.string(),
+  args: z.record(z.unknown()).optional(),
+  threadId: z.string().optional(),
+  configurable: z
+    .object({
+      checkpoint_ns: z.string().optional(),
+    })
+    .optional(),
+})
+
+// Stream event encoder
+const encoder = new TextEncoder()
+
+// Helper to create SSE messages
+const createSSEMessage = (event: string, data: unknown, threadId: string) => {
+  return `data: ${JSON.stringify({ event, threadId, data })}\n\n`
+}
+
+// Helper to create error responses
+const createErrorResponse = (status: number, error: string, details?: string) => {
+  return new Response(
+    JSON.stringify({
+      error,
+      details,
+    }),
+    {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    }
+  )
+}
+
+// Handler for chat requests
+const handleChatRequest = async (body: unknown, agent: any) => {
+  // Validate request body
+  const result = ChatRequestSchema.safeParse(body)
+  if (!result.success) {
+    throw new Error('Invalid chat request: ' + result.error.message)
   }
+
+  const { messages, threadId = uuidv4(), safetyConfig, configurable } = result.data
 
   // Validate input length
-  const totalLength = body.messages.reduce(
-    (acc: number, msg: any) => acc + (msg.content?.length || 0),
-    0
-  )
-  if (
-    totalLength >
-    (body.safetyConfig?.maxInputLength || DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength)
-  ) {
-    return new Response(JSON.stringify({ error: 'Input exceeds maximum length' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    })
+  const totalLength = messages.reduce((acc, msg) => acc + msg.content.length, 0)
+  const maxLength = safetyConfig?.maxInputLength || DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength
+  if (totalLength > maxLength) {
+    throw new Error('Input exceeds maximum length')
   }
 
-  // Generate thread_id if not provided
-  const threadId = body.threadId || uuidv4()
-
   // Create a ReadableStream for SSE
-  const encoder = new TextEncoder()
   const stream = new ReadableStream({
     async start(controller) {
       try {
         // Send initial message
-        const startEvent = `data: ${JSON.stringify({ event: 'start', threadId })}\n\n`
-        controller.enqueue(encoder.encode(startEvent))
+        controller.enqueue(encoder.encode(createSSEMessage('start', null, threadId)))
 
         // Process chat request
         const result = await agent.invoke(
           {
-            messages: body.messages.map((msg: any) => ({
-              role: msg.role || 'user',
+            messages: messages.map(msg => ({
+              role: msg.role,
               content: msg.content,
             })),
             configurable: {
               thread_id: threadId,
-              checkpoint_ns: body.configurable?.checkpoint_ns || 'default',
+              checkpoint_ns: configurable?.checkpoint_ns || 'default',
               [Symbol.toStringTag]: 'AgentConfigurable',
             },
           },
@@ -61,27 +111,32 @@ const handleChatRequest = async (body: any, agent: any) => {
 
         // Send messages
         for (const message of result.messages) {
-          const messageEvent = `data: ${JSON.stringify({
-            event: 'message',
-            data: {
-              type: message.type,
-              content: message.content,
-              threadId,
-            },
-          })}\n\n`
-          controller.enqueue(encoder.encode(messageEvent))
+          controller.enqueue(
+            encoder.encode(
+              createSSEMessage(
+                'message',
+                {
+                  type: message.type,
+                  content: message.content,
+                },
+                threadId
+              )
+            )
+          )
         }
 
         // Send final message
-        const endEvent = `data: ${JSON.stringify({ event: 'end', threadId })}\n\n`
-        controller.enqueue(encoder.encode(endEvent))
+        controller.enqueue(encoder.encode(createSSEMessage('end', null, threadId)))
       } catch (error) {
-        const errorEvent = `data: ${JSON.stringify({
-          event: 'error',
-          error: error instanceof Error ? error.message : String(error),
-          threadId,
-        })}\n\n`
-        controller.enqueue(encoder.encode(errorEvent))
+        controller.enqueue(
+          encoder.encode(
+            createSSEMessage(
+              'error',
+              { error: error instanceof Error ? error.message : String(error) },
+              threadId
+            )
+          )
+        )
       } finally {
         controller.close()
       }
@@ -97,29 +152,30 @@ const handleChatRequest = async (body: any, agent: any) => {
   })
 }
 
-const handleToolRequest = async (body: any, agent: any) => {
+// Handler for tool requests
+const handleToolRequest = async (body: unknown, agent: any) => {
   // Validate tool request
-  if (!body.name || typeof body.name !== 'string') {
-    throw new Error('Tool name is required')
+  const result = ToolRequestSchema.safeParse(body)
+  if (!result.success) {
+    throw new Error('Invalid tool request: ' + result.error.message)
   }
 
-  // Generate thread_id if not provided
-  const threadId = body.threadId || uuidv4()
+  const { name, args = {}, threadId = uuidv4(), configurable } = result.data
 
   // Process tool request
-  const result = await agent.invoke(
+  const toolResult = await agent.invoke(
     {
       messages: [
         {
           role: 'user',
           type: 'tool',
-          name: body.name,
-          args: body.args || {},
+          name,
+          args,
         },
       ],
       configurable: {
         thread_id: threadId,
-        checkpoint_ns: body.configurable?.checkpoint_ns || 'default',
+        checkpoint_ns: configurable?.checkpoint_ns || 'default',
         [Symbol.toStringTag]: 'AgentConfigurable',
       },
     },
@@ -132,12 +188,12 @@ const handleToolRequest = async (body: any, agent: any) => {
     }
   )
 
-  // Return tool registration response
   return new Response(
     JSON.stringify({
       success: true,
       toolId: threadId,
       message: 'Tool registered successfully',
+      result: toolResult,
     }),
     {
       status: 200,
@@ -146,32 +202,24 @@ const handleToolRequest = async (body: any, agent: any) => {
   )
 }
 
+// Main request handler
 const handleRequest = async (req: Request): Promise<Response> => {
   const threadId = uuidv4()
-  logger.debug('Created new agent', { threadId })
+  logger.debug('Processing request', { threadId })
 
   try {
-    const url = new URL(req.url)
-    const path = url.pathname.toLowerCase()
-
     // Validate request method
     if (req.method !== 'POST') {
-      return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-        status: 405,
-        headers: { 'Content-Type': 'application/json' },
-      })
+      return createErrorResponse(405, 'Method not allowed')
     }
 
     // Parse request body
-    let body
+    let body: unknown
     try {
       body = await req.json()
     } catch (error) {
       logger.error('Failed to parse request body', { threadId, error })
-      return new Response(JSON.stringify({ error: 'Invalid JSON in request body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      })
+      return createErrorResponse(400, 'Invalid JSON in request body')
     }
 
     // Create agent
@@ -184,30 +232,28 @@ const handleRequest = async (req: Request): Promise<Response> => {
       }
 
       agent = await createReActAgent({
-        modelName: body.modelName || DEFAULT_AGENT_CONFIG.modelName,
-        host: body.host || DEFAULT_AGENT_CONFIG.host,
+        modelName: (body as any).modelName || DEFAULT_AGENT_CONFIG.modelName,
+        host: (body as any).host || DEFAULT_AGENT_CONFIG.host,
         threadId,
         configurable,
         maxIterations: DEFAULT_AGENT_CONFIG.maxIterations,
         userInputTimeout: DEFAULT_AGENT_CONFIG.userInputTimeout,
-        safetyConfig: body.safetyConfig || DEFAULT_AGENT_CONFIG.safetyConfig,
+        safetyConfig: (body as any).safetyConfig || DEFAULT_AGENT_CONFIG.safetyConfig,
       })
-      logger.debug('Updated agent last access time', { threadId })
+      logger.debug('Agent created successfully', { threadId })
     } catch (error) {
       logger.error('Failed to create agent', { threadId, error })
-      return new Response(
-        JSON.stringify({
-          error: 'Failed to initialize agent',
-          details: error instanceof Error ? error.message : String(error),
-        }),
-        {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' },
-        }
+      return createErrorResponse(
+        500,
+        'Failed to initialize agent',
+        error instanceof Error ? error.message : String(error)
       )
     }
 
-    // Process request based on path
+    // Route request based on path
+    const url = new URL(req.url)
+    const path = url.pathname.toLowerCase()
+
     try {
       switch (path) {
         case '/chat':
@@ -215,10 +261,7 @@ const handleRequest = async (req: Request): Promise<Response> => {
         case '/tool':
           return await handleToolRequest(body, agent)
         default:
-          return new Response(JSON.stringify({ error: 'Not found' }), {
-            status: 404,
-            headers: { 'Content-Type': 'application/json' },
-          })
+          return createErrorResponse(404, 'Not found')
       }
     } catch (error) {
       logger.error('Error processing request', {
@@ -233,15 +276,10 @@ const handleRequest = async (req: Request): Promise<Response> => {
               }
             : error,
       })
-      return new Response(
-        JSON.stringify({
-          error: 'Request processing failed',
-          details: error instanceof Error ? error.message : String(error),
-        }),
-        {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' },
-        }
+      return createErrorResponse(
+        500,
+        'Request processing failed',
+        error instanceof Error ? error.message : String(error)
       )
     }
   } catch (error) {
@@ -256,15 +294,10 @@ const handleRequest = async (req: Request): Promise<Response> => {
             }
           : error,
     })
-    return new Response(
-      JSON.stringify({
-        error: 'Internal server error',
-        details: error instanceof Error ? error.message : String(error),
-      }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
+    return createErrorResponse(
+      500,
+      'Internal server error',
+      error instanceof Error ? error.message : String(error)
     )
   }
 }

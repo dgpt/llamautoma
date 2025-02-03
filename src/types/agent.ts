@@ -1,4 +1,3 @@
-import { Tool } from '@langchain/core/tools'
 import { BaseMessage } from '@langchain/core/messages'
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
@@ -17,9 +16,6 @@ export interface AgentState {
   safetyConfig: SafetyConfig
   toolFeedback: Record<string, unknown>
   userConfirmed: boolean
-  tools: Tool[]
-  chatModel: BaseChatModel
-  maxIterations: number
   threadId: string
   configurable: AgentConfigurable
   streamComplete?: boolean
@@ -141,11 +137,6 @@ export interface AgentConfig {
   temperature?: number
 }
 
-export interface XMLValidationResult {
-  valid: boolean
-  error?: Error
-}
-
 export const DEFAULT_AGENT_CONFIG = {
   modelName: 'qwen2.5-coder:1.5b',
   host: 'http://localhost:11434',
@@ -169,3 +160,72 @@ export const DEFAULT_AGENT_CONFIG = {
   },
 }
 
+// Response format schema for ReAct agent
+export const ReActResponseSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('thought'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('tool'),
+    thought: z.string(),
+    action: z.string(),
+    args: z.record(z.unknown()),
+  }),
+  z.object({
+    type: z.literal('final'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('chat'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('error'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('observation'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('confirmation'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('feedback'),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('code'),
+    language: z.string(),
+    code: z.string(),
+  }),
+  z.object({
+    type: z.literal('edit'),
+    file: z.string(),
+    changes: z.array(
+      z.object({
+        type: z.enum(['insert', 'update', 'delete']),
+        location: z.string(),
+        content: z.string(),
+      })
+    ),
+  }),
+  z.object({
+    type: z.literal('compose'),
+    file: z.object({
+      path: z.string(),
+      content: z.string(),
+    }),
+  }),
+  z.object({
+    type: z.literal('sync'),
+    file: z.object({
+      path: z.string(),
+      content: z.string(),
+    }),
+  }),
+])
+
+export type ReActResponse = z.infer<typeof ReActResponseSchema>

