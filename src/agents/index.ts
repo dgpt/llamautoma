@@ -1,6 +1,6 @@
 import { createReactAgent } from '@langchain/langgraph/prebuilt'
 import { ChatOllama } from '@langchain/ollama'
-import { SystemMessage } from '@langchain/core/messages'
+import { SystemMessage, AIMessage, BaseMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { logger } from '@/logger'
 import {
@@ -19,32 +19,65 @@ import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { entrypoint, task } from '@langchain/langgraph'
 
 const SYSTEM_PROMPT = `You are an advanced AI assistant designed to solve tasks systematically and safely.
-Your responses MUST ALWAYS be in a structured format.
+Your responses MUST ALWAYS be in a structured JSON format with a type field.
 
 Guidelines:
 1. Break down complex tasks into manageable steps
 2. Use available tools strategically and safely
 3. Provide clear, step-by-step reasoning
-4. Always include TypeScript in your responses when discussing code or programming concepts
 
 IMPORTANT:
-- For TypeScript code execution, use the typescript-execution tool
-- Use typescript-execution tool to perform math or any other calculations
+- For calculations, use the typescript-execution tool
 - For dangerous operations, ALWAYS explain why they are unsafe
 - For tool usage, ALWAYS wait for confirmation when required
 - For tool execution, ALWAYS provide feedback when required
 
-Available tools:
-{tools}`
+Response format MUST be one of:
+{
+  "type": "thought",
+  "content": "Your reasoning here"
+}
+
+{
+  "type": "chat",
+  "content": "Your message here"
+}
+
+{
+  "type": "tool",
+  "thought": "Why you're using the tool",
+  "action": "tool-name",
+  "args": { "arg1": "value1" }
+}
+
+{
+  "type": "final",
+  "content": "Your final answer here"
+}
+
+Example:
+User: What is 2 + 2?
+Assistant: {
+  "type": "thought",
+  "content": "I'll solve this basic arithmetic problem"
+}
+{
+  "type": "tool",
+  "thought": "Let me verify the calculation",
+  "action": "typescript-execution",
+  "args": { "code": "2 + 2" }
+}
+{
+  "type": "chat",
+  "content": "2 + 2 equals 4"
+}`
 
 export function createReActAgent(config: FunctionalReActConfig) {
   // Validate config using zod schema
   const validatedConfig = FunctionalReActConfigSchema.parse(config)
 
-  // Initialize memory persistence
+  // Initialize memory persistence and chat model
   const memorySaver = validatedConfig.memoryPersistence || new MemorySaver()
-
-  // Initialize chat model
   const chatModel =
     validatedConfig.chatModel ||
     new ChatOllama({
@@ -52,67 +85,66 @@ export function createReActAgent(config: FunctionalReActConfig) {
       baseUrl: validatedConfig.host || DEFAULT_AGENT_CONFIG.host,
     })
 
-  logger.debug(
-    {
-      modelName: validatedConfig.modelName,
-      host: validatedConfig.host,
-    },
-    'Created chat model'
-  )
-
-  // Validate chat model
-  if (!chatModel.invoke || typeof chatModel.invoke !== 'function') {
-    throw new Error('Invalid chat model: invoke method not found')
-  }
-
-  // Configure safety settings based on environment
+  // Configure safety settings
   const safetyConfig: SafetyConfig =
     process.env.NODE_ENV === 'test'
       ? {
           ...DEFAULT_AGENT_CONFIG.safetyConfig,
           requireToolConfirmation: false,
           requireToolFeedback: false,
-          maxInputLength: DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength,
-          dangerousToolPatterns: DEFAULT_AGENT_CONFIG.safetyConfig.dangerousToolPatterns,
         }
-      : {
-          ...DEFAULT_AGENT_CONFIG.safetyConfig,
-          ...(validatedConfig.safetyConfig || {}),
-        }
+      : { ...DEFAULT_AGENT_CONFIG.safetyConfig, ...(validatedConfig.safetyConfig || {}) }
 
-  // Configure tools with proper error handling
+  // Configure tools
   const agentTools = AGENT_TOOLS.map(tool => ({
     name: tool.name,
     description: tool.description,
     func: async (input: Record<string, unknown>) => {
       try {
-        const result = await tool.invoke(input)
-        return result
+        return await tool.invoke(input)
       } catch (error) {
-        logger.error('Tool execution failed', {
-          tool: tool.name,
-          error: error instanceof Error ? error.message : String(error),
-        })
+        logger.error('Tool execution failed', { tool: tool.name, error })
         throw error
       }
     },
   }))
 
-  // Create the model task
+  // Create model task
   const callModel = task(
     'callModel',
-    async (messages: AgentInput['messages'], runConfig?: RunnableConfig) => {
-      const result = await chatModel.invoke(messages, runConfig)
-      return result
+    async (messages: BaseMessage[], runConfig?: RunnableConfig) => {
+      return await chatModel.invoke(messages, runConfig)
     }
   )
 
+  // Create tool execution task
+  const executeToolTask = task(
+    'executeToolTask',
+    async (toolCall: { action: string; args: Record<string, unknown> }) => {
+      const tool = agentTools.find(t => t.name === toolCall.action)
+      if (!tool) throw new Error(`Tool ${toolCall.action} not found`)
+      return await tool.func(toolCall.args)
+    }
+  )
+
+  // Helper to format response as JSON
+  const formatResponse = (content: string): string => {
+    try {
+      // Check if it's already valid JSON
+      JSON.parse(content)
+      return content
+    } catch {
+      // If not JSON, wrap in a chat response
+      return JSON.stringify({
+        type: 'chat',
+        content: content.trim(),
+      })
+    }
+  }
+
   // Create the agent workflow
   const workflow = entrypoint(
-    {
-      checkpointer: memorySaver,
-      name: 'react_agent',
-    },
+    { checkpointer: memorySaver, name: 'react_agent' },
     async (inputs: AgentInput) => {
       const { messages, configurable } = inputs
       const threadId = configurable?.thread_id || uuidv4()
@@ -122,47 +154,56 @@ export function createReActAgent(config: FunctionalReActConfig) {
         [Symbol.toStringTag]: 'AgentConfigurable',
       }
 
-      const systemMessage = new SystemMessage(
-        SYSTEM_PROMPT.replace(
-          '{tools}',
-          agentTools.map(t => `${t.name}: ${t.description}`).join('\n')
-        )
-      )
-
-      // Execute model with system message and user messages
-      const result = await callModel([systemMessage, ...messages], {
-        configurable: agentConfigurable,
-      })
-
-      // Parse response and determine status
+      const systemMessage = new SystemMessage(SYSTEM_PROMPT)
+      const allMessages: BaseMessage[] = [systemMessage, ...messages]
       let status: 'continue' | 'end' = 'continue'
       let toolFeedback = {}
+      let iterations = 0
 
       try {
-        const response = JSON.parse(result.content.toString())
-        if (ReActResponseSchema.safeParse(response).success) {
-          if (response.type === 'final') {
-            status = 'end'
-          } else if (response.type === 'tool' && response.action === 'typescript-execution') {
-            toolFeedback = {
-              executionResult: response.args?.output || '',
-              executionSuccess: !response.args?.error,
-            }
-          }
-        }
-      } catch {
-        // If we can't parse the JSON, default to continue
-        status = 'continue'
-      }
+        const result = await callModel(allMessages, { configurable: agentConfigurable })
+        const formattedContent = formatResponse(result.content.toString())
+        const response = JSON.parse(formattedContent)
 
-      // Return structured output
-      return {
-        messages: [result],
-        status,
-        toolFeedback,
-        iterations: 0,
-        threadId,
-        configurable: agentConfigurable,
+        if (ReActResponseSchema.safeParse(response).success) {
+          if (response.type === 'tool' && response.action === 'typescript-execution') {
+            const toolResult = await executeToolTask(response)
+            toolFeedback = { executionResult: toolResult, executionSuccess: true }
+            allMessages.push(
+              new AIMessage(
+                JSON.stringify({
+                  type: 'chat',
+                  content: `${response.args.code} equals ${toolResult}`,
+                })
+              )
+            )
+          } else {
+            allMessages.push(result)
+          }
+          status = response.type === 'thought' ? 'continue' : 'end'
+        } else {
+          allMessages.push(
+            new AIMessage(
+              JSON.stringify({
+                type: 'chat',
+                content: result.content.toString(),
+              })
+            )
+          )
+          status = 'end'
+        }
+
+        return {
+          messages: allMessages,
+          status,
+          toolFeedback,
+          iterations,
+          threadId,
+          configurable: agentConfigurable,
+        }
+      } catch (error) {
+        logger.error('Workflow execution failed', { threadId, error })
+        throw error
       }
     }
   )
@@ -183,19 +224,11 @@ export function createReActAgent(config: FunctionalReActConfig) {
 
       try {
         return await workflow.invoke(
-          {
-            messages: input.messages,
-            configurable: baseConfigurable,
-          },
-          {
-            configurable: baseConfigurable,
-          }
+          { messages: input.messages, configurable: baseConfigurable },
+          { configurable: baseConfigurable }
         )
       } catch (error) {
-        logger.error('Agent execution failed', {
-          threadId,
-          error: error instanceof Error ? error.message : String(error),
-        })
+        logger.error('Agent execution failed', { threadId, error })
         throw error
       }
     },
