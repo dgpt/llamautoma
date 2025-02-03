@@ -10,11 +10,11 @@ import {
   SafetyConfig,
   ReActResponseSchema,
 } from '@/types/agent'
-import { convertToBaseReActTool } from '@/agents/tools/baseTool'
 import AGENT_TOOLS from '@/agents/tools'
 import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
 import { v4 as uuidv4 } from 'uuid'
 import { FunctionalReActConfigSchema } from '@/types/agent'
+import { MemorySaver } from '@langchain/langgraph-checkpoint'
 
 const SYSTEM_PROMPT = `You are an advanced AI assistant designed to solve tasks systematically and safely.
 Your responses MUST ALWAYS be in a structured format.
@@ -25,11 +25,11 @@ Guidelines:
 3. Provide clear, step-by-step reasoning
 
 IMPORTANT:
-- For calculations, ALWAYS use the calculator tool
+- For TypeScript code execution, use the typescript-execution tool
+- Use typescript-execution tool to perform math or any other calculations
 - For dangerous operations, ALWAYS explain why they are unsafe
 - For tool usage, ALWAYS wait for confirmation when required
 - For tool execution, ALWAYS provide feedback when required
-- ALWAYS stop if safety checks fail
 
 Available tools:
 {tools}`
@@ -37,6 +37,9 @@ Available tools:
 export function createReActAgent(config: FunctionalReActConfig) {
   // Validate config using zod schema
   const validatedConfig = FunctionalReActConfigSchema.parse(config)
+
+  // Initialize memory persistence
+  const memorySaver = validatedConfig.memoryPersistence || new MemorySaver()
 
   // Initialize chat model
   const chatModel =
@@ -74,19 +77,31 @@ export function createReActAgent(config: FunctionalReActConfig) {
           ...(validatedConfig.safetyConfig || {}),
         }
 
-  // Convert provided tools or use defaults
-  const agentTools = validatedConfig.tools
-    ? validatedConfig.tools.map(convertToBaseReActTool)
-    : AGENT_TOOLS.map(convertToBaseReActTool)
+  // Configure tools with proper error handling
+  const agentTools = AGENT_TOOLS.map(tool => ({
+    ...tool,
+    invoke: async (...args: any[]) => {
+      try {
+        const result = await tool.invoke(...args)
+        return result
+      } catch (error) {
+        logger.error('Tool execution failed', {
+          tool: tool.name,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        throw error
+      }
+    },
+  }))
 
-  // Create the ReAct agent with structured response format
+  // Create the ReAct agent with structured response format using LangGraph's Functional API
   const agent = createReactAgent({
     llm: chatModel,
     tools: agentTools,
     responseFormat: {
       schema: ReActResponseSchema,
       prompt:
-        'Always return responses in the JSON format specified by the schema. For tool calls, include thought process and arguments. For final answers, include clear explanations.',
+        'Always return responses in the JSON format specified by the schema. For tool calls, include thought process and arguments. For final answers, include clear explanations. For TypeScript execution, validate code before running.',
     },
   })
 
@@ -104,39 +119,69 @@ export function createReActAgent(config: FunctionalReActConfig) {
           validatedConfig.threadId ||
           input.configurable?.thread_id ||
           uuidv4(),
-        checkpoint_ns: 'react_agent',
+        checkpoint_ns: input.configurable?.checkpoint_ns || 'react_agent',
         [Symbol.toStringTag]: 'AgentConfigurable' as const,
       }
 
-      // Execute agent with input
-      const result = await agent.invoke(
-        {
-          messages: [systemMessage, ...input.messages],
-        },
-        runConfig
-      )
-
-      // Parse the last message to determine status
-      const lastMessage = result.messages[result.messages.length - 1]
-      let status: 'continue' | 'end' = 'continue'
-      try {
-        const response = JSON.parse(lastMessage.content.toString())
-        if (ReActResponseSchema.safeParse(response).success && response.type === 'final') {
-          status = 'end'
-        }
-      } catch {
-        // If we can't parse the JSON, default to continue
-        status = 'continue'
+      // Setup memory configuration
+      const memoryConfig = {
+        persistence: memorySaver,
+        namespace: baseConfigurable.checkpoint_ns,
+        threadId: baseConfigurable.thread_id,
       }
 
-      // Return output with structured response
-      return {
-        messages: result.messages,
-        status,
-        toolFeedback: {},
-        iterations: 0,
-        threadId: baseConfigurable.thread_id,
-        configurable: baseConfigurable,
+      try {
+        // Execute agent with input and system message
+        const result = await agent.invoke(
+          {
+            messages: [systemMessage, ...input.messages],
+          },
+          {
+            ...runConfig,
+            configurable: {
+              ...baseConfigurable,
+              memory: memoryConfig,
+            },
+          }
+        )
+
+        // Parse the last message to determine status
+        const lastMessage = result.messages[result.messages.length - 1]
+        let status: 'continue' | 'end' = 'continue'
+        let toolFeedback = {}
+
+        try {
+          const response = JSON.parse(lastMessage.content.toString())
+          if (ReActResponseSchema.safeParse(response).success) {
+            if (response.type === 'final') {
+              status = 'end'
+            } else if (response.type === 'tool' && response.action === 'typescript-execution') {
+              toolFeedback = {
+                executionResult: response.args?.output || '',
+                executionSuccess: !response.args?.error,
+              }
+            }
+          }
+        } catch {
+          // If we can't parse the JSON, default to continue
+          status = 'continue'
+        }
+
+        // Return output with structured response
+        return {
+          messages: result.messages,
+          status,
+          toolFeedback,
+          iterations: 0,
+          threadId: baseConfigurable.thread_id,
+          configurable: baseConfigurable,
+        }
+      } catch (error) {
+        logger.error('Agent execution failed', {
+          threadId: baseConfigurable.thread_id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        throw error
       }
     },
   }
