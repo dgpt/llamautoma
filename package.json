@@ -1,6 +1,6 @@
 {
   "name": "llamautoma",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-powered automation server using LangChain.js and LangGraph.js",
   "type": "module",
   "scripts": {
@@ -39,6 +39,6 @@
   "engines": {
     "bun": ">=1.0.0"
   },
-  "author": "",
+  "author": "https://github.com/dgpt",
   "license": "MIT"
 }
