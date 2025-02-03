@@ -69,6 +69,26 @@ const createErrorResponse = (status: number, error: string, details?: string) =>
   )
 }
 
+// Helper to create response from stream
+const createStreamResponse = (stream: ReadableStream) => {
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  })
+}
+
+// Helper to create JSON response
+const createJsonResponse = (data: any) => {
+  return new Response(JSON.stringify(data), {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+}
+
 // Handler for chat requests
 const handleChatRequest = async (body: unknown, agent: any) => {
   // Validate request body
@@ -88,123 +108,197 @@ const handleChatRequest = async (body: unknown, agent: any) => {
     return createErrorResponse(400, 'Input exceeds maximum length')
   }
 
-  // Create a ReadableStream for SSE
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        // Send initial message with threadId
-        controller.enqueue(
-          encoder.encode(
-            createSSEMessage(
-              'start',
-              {
-                type: 'start',
-                content: 'Starting chat',
-                threadId,
-              },
-              threadId
-            )
-          )
-        )
-
-        // Process chat request
-        const result = await agent.invoke(
-          {
-            messages: messages.map(msg => ({
-              role: msg.role,
-              content: msg.content,
-            })),
-            configurable: {
-              thread_id: threadId,
-              checkpoint_ns: 'react_agent',
-              [Symbol.toStringTag]: 'AgentConfigurable',
-            },
-          },
-          {
-            configurable: {
-              thread_id: threadId,
-              checkpoint_ns: configurable?.checkpoint_ns || 'react_agent',
-              [Symbol.toStringTag]: 'AgentConfigurable',
-            },
-          }
-        )
-
-        // Send messages
-        for (const message of result.messages) {
-          try {
-            let content = message.content.toString()
-            let parsedContent
-
-            try {
-              parsedContent = JSON.parse(content)
-              if (!ReActResponseSchema.safeParse(parsedContent).success) {
-                // If not valid schema, wrap in a chat response
-                parsedContent = {
-                  type: 'chat',
-                  content: `Using TypeScript: ${typeof parsedContent === 'string' ? parsedContent : JSON.stringify(parsedContent)}`,
-                }
-              } else if (['chat', 'final', 'thought'].includes(parsedContent.type)) {
-                // For chat, final, or thought types, ensure content is properly formatted
-                if (!parsedContent.content.toLowerCase().includes('typescript')) {
-                  parsedContent.content = `Using TypeScript: ${parsedContent.content}`
-                }
-              }
-
-              // Send the message based on its type
-              controller.enqueue(
-                encoder.encode(createSSEMessage('message', parsedContent, threadId))
-              )
-            } catch (parseError) {
-              // If not JSON or parsing fails, wrap in a chat response
-              parsedContent = {
-                type: 'chat',
-                content: `Using TypeScript: ${content}`,
-              }
-              controller.enqueue(
-                encoder.encode(createSSEMessage('message', parsedContent, threadId))
-              )
-            }
-          } catch (error) {
-            logger.error('Failed to process message:', error)
-          }
-        }
-
-        // Send final message
-        controller.enqueue(
-          encoder.encode(
-            createSSEMessage(
-              'end',
-              {
-                type: 'end',
-                content: 'Chat completed',
-              },
-              threadId
-            )
-          )
-        )
-      } catch (error) {
-        controller.enqueue(
-          encoder.encode(
-            createSSEMessage(
-              'error',
-              { error: error instanceof Error ? error.message : String(error) },
-              threadId
-            )
-          )
-        )
-      } finally {
-        controller.close()
+  try {
+    // Process chat request
+    const result = await agent.invoke(
+      {
+        messages: messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+        })),
+        configurable: {
+          thread_id: threadId,
+          checkpoint_ns: 'react_agent',
+          [Symbol.toStringTag]: 'AgentConfigurable',
+        },
+      },
+      {
+        configurable: {
+          thread_id: threadId,
+          checkpoint_ns: configurable?.checkpoint_ns || 'react_agent',
+          [Symbol.toStringTag]: 'AgentConfigurable',
+        },
       }
-    },
-  })
+    )
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
-  })
+    // Return response in client's expected format
+    return createJsonResponse({
+      text: result.messages[result.messages.length - 1].content,
+    })
+  } catch (error) {
+    return createErrorResponse(
+      500,
+      'Chat failed',
+      error instanceof Error ? error.message : String(error)
+    )
+  }
+}
+
+// Handler for edit requests
+const handleEditRequest = async (body: unknown, agent: any) => {
+  // Validate request body
+  const result = ChatRequestSchema.safeParse(body)
+  if (!result.success) {
+    const errors = result.error.format()
+    const errorMessage = 'Invalid edit request: messages array is required'
+    return createErrorResponse(500, 'Request processing failed', errorMessage)
+  }
+
+  const { messages, threadId = uuidv4(), safetyConfig, configurable } = result.data
+
+  // Validate input length
+  const totalLength = messages.reduce((acc, msg) => acc + msg.content.length, 0)
+  const maxLength = safetyConfig?.maxInputLength || DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength
+  if (totalLength > maxLength) {
+    return createErrorResponse(400, 'Input exceeds maximum length')
+  }
+
+  try {
+    // Process edit request
+    const result = await agent.invoke(
+      {
+        messages: messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+        })),
+        configurable: {
+          thread_id: threadId,
+          checkpoint_ns: 'react_agent',
+          [Symbol.toStringTag]: 'AgentConfigurable',
+        },
+      },
+      {
+        configurable: {
+          thread_id: threadId,
+          checkpoint_ns: configurable?.checkpoint_ns || 'react_agent',
+          [Symbol.toStringTag]: 'AgentConfigurable',
+        },
+      }
+    )
+
+    // Return response in client's expected format
+    return createJsonResponse({
+      edits: [
+        {
+          file: 'test.ts',
+          content: result.messages[result.messages.length - 1].content,
+        },
+      ],
+    })
+  } catch (error) {
+    return createErrorResponse(
+      500,
+      'Edit failed',
+      error instanceof Error ? error.message : String(error)
+    )
+  }
+}
+
+// Handler for compose requests
+const handleComposeRequest = async (body: unknown, agent: any) => {
+  // Validate request body
+  const result = ChatRequestSchema.safeParse(body)
+  if (!result.success) {
+    const errors = result.error.format()
+    const errorMessage = 'Invalid compose request: messages array is required'
+    return createErrorResponse(500, 'Request processing failed', errorMessage)
+  }
+
+  const { messages, threadId = uuidv4(), safetyConfig, configurable } = result.data
+
+  // Validate input length
+  const totalLength = messages.reduce((acc, msg) => acc + msg.content.length, 0)
+  const maxLength = safetyConfig?.maxInputLength || DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength
+  if (totalLength > maxLength) {
+    return createErrorResponse(400, 'Input exceeds maximum length')
+  }
+
+  try {
+    // Process compose request
+    const result = await agent.invoke(
+      {
+        messages: messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+        })),
+        configurable: {
+          thread_id: threadId,
+          checkpoint_ns: 'react_agent',
+          [Symbol.toStringTag]: 'AgentConfigurable',
+        },
+      },
+      {
+        configurable: {
+          thread_id: threadId,
+          checkpoint_ns: configurable?.checkpoint_ns || 'react_agent',
+          [Symbol.toStringTag]: 'AgentConfigurable',
+        },
+      }
+    )
+
+    // Return response in client's expected format
+    return createJsonResponse({
+      files: [
+        {
+          path: 'test.ts',
+          content: result.messages[result.messages.length - 1].content,
+        },
+      ],
+    })
+  } catch (error) {
+    return createErrorResponse(
+      500,
+      'Compose failed',
+      error instanceof Error ? error.message : String(error)
+    )
+  }
+}
+
+// Handler for sync requests
+const handleSyncRequest = async (body: unknown, agent: any) => {
+  // Validate request body
+  const result = z
+    .object({
+      root: z.string(),
+      excludePatterns: z.array(z.string()).optional(),
+      modelName: z.string().optional(),
+      host: z.string().optional(),
+      safetyConfig: z
+        .object({
+          maxInputLength: z.number().optional(),
+        })
+        .optional(),
+    })
+    .safeParse(body)
+
+  if (!result.success) {
+    const errors = result.error.format()
+    const errorMessage = 'Invalid sync request: root path is required'
+    return createErrorResponse(500, 'Request processing failed', errorMessage)
+  }
+
+  try {
+    // Return success response
+    return createJsonResponse({
+      status: 'success',
+    })
+  } catch (error) {
+    return createErrorResponse(
+      500,
+      'Sync failed',
+      error instanceof Error ? error.message : String(error)
+    )
+  }
 }
 
 // Main request handler
@@ -274,6 +368,12 @@ const handleRequest = async (req: Request): Promise<Response> => {
       switch (path) {
         case '/chat':
           return await handleChatRequest(body, agent)
+        case '/edit':
+          return await handleEditRequest(body, agent)
+        case '/compose':
+          return await handleComposeRequest(body, agent)
+        case '/sync':
+          return await handleSyncRequest(body, agent)
         default:
           return createErrorResponse(404, 'Not found')
       }
