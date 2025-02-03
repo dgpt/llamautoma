@@ -1,5 +1,5 @@
-import { FileSystemTool } from './fileSystemTool'
-import { TypeScriptExecutionTool } from './typescriptExecutionTool'
+import { FileSystemTool } from '@/agents/tools/fileSystemTool'
+import { TypeScriptExecutionTool } from '@/agents/tools/typescriptExecutionTool'
 
 /**
  * All available tools for the ReAct agent

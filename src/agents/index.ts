@@ -2,16 +2,23 @@ import { Tool } from '@langchain/core/tools'
 import { entrypoint, task } from '@langchain/langgraph'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { ChatOllama } from '@langchain/ollama'
-import { SystemMessage, AIMessage } from '@langchain/core/messages'
+import { SystemMessage, AIMessage, BaseMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
-import { logger } from '../../utils/logger'
-import { AgentState, AgentInput, AgentOutput, FunctionalReActConfig, SafetyConfig } from '../../types/agent'
-import { SafetyChecker } from './safety/safetyChecker'
-import { ToolExecutor } from './tools/toolExecutor'
-import { UserInteractionManager } from './interaction/userInteractionManager'
-import { convertToBaseReActTool } from './tools/baseTool'
-import AGENT_TOOLS from './tools'
-import { DEFAULT_AGENT_CONFIG } from './types'
+import { logger } from '@/logger'
+import {
+  AgentState,
+  AgentInput,
+  AgentOutput,
+  FunctionalReActConfig,
+  SafetyConfig,
+} from '@/types/agent'
+import { SafetyChecker } from '@/agents/managers/safety'
+import { ToolExecutor } from '@/agents/tools/toolExecutor'
+import { UserInteractionManager } from '@/agents/managers/userInteraction'
+import { convertToBaseReActTool } from '@/agents/tools/baseTool'
+import AGENT_TOOLS from '@/agents/tools'
+import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
+import { v4 as uuidv4 } from 'uuid'
 
 // Convert tools to base ReAct tools once at startup
 const tools = AGENT_TOOLS.map(convertToBaseReActTool)
@@ -97,113 +104,133 @@ IMPORTANT:
 Available tools:
 {tools}`
 
-const parseModelResponse = task(
-  'parse_model_response',
-  async (content: string) => {
-    try {
-      // First validate basic XML structure
-      if (!content.match(/<response type="[^"]+">.*?<\/response>/s)) {
-        return { success: false, error: 'Invalid XML format' as const }
-      }
-
-      // Extract response type
-      const typeMatch = content.match(/<response type="([^"]+)">/s)
-      if (!typeMatch) {
-        return { success: false, error: 'Missing response type' as const }
-      }
-
-      const responseType = typeMatch[1]
-
-      switch (responseType) {
-        case 'tool': {
-          const toolMatch = content.match(/<response type="tool">\s*<thought>(.*?)<\/thought>\s*<action>(.*?)<\/action>\s*<args>(.*?)<\/args>\s*<\/response>/s)
-          if (!toolMatch) {
-            return { success: false, error: 'Invalid tool response format' as const }
-          }
-          const [_, thought, toolName, argsStr] = toolMatch
-          try {
-            const args = JSON.parse(argsStr.trim())
-            return { success: true, responseType, toolName, toolArgs: args, thought }
-          } catch (error) {
-            logger.error({ error }, 'Failed to parse tool arguments JSON')
-            return { success: false, error: 'Invalid JSON in tool arguments' as const }
-          }
-        }
-
-        case 'final':
-        case 'chat':
-        case 'thought':
-        case 'observation':
-        case 'feedback':
-        case 'error': {
-          const contentMatch = content.match(new RegExp(`<response type="${responseType}">\\s*<content>(.*?)<\\/content>\\s*<\\/response>`, 's'))
-          if (!contentMatch) {
-            return { success: false, error: `Invalid ${responseType} response format` as const }
-          }
-          return {
-            success: true,
-            responseType,
-            content: contentMatch[1].trim(),
-            isFinal: responseType === 'final' || responseType === 'chat'
-          }
-        }
-
-        case 'edit': {
-          const fileMatch = content.match(/<file>(.*?)<\/file>/s)
-          const changes = Array.from(content.matchAll(/<change type="([^"]+)">\s*<location>(.*?)<\/location>\s*<content>(.*?)<\/content>\s*<\/change>/gs))
-          if (!fileMatch || !changes.length) {
-            return { success: false, error: 'Invalid edit response format' as const }
-          }
-          return {
-            success: true,
-            responseType,
-            file: fileMatch[1].trim(),
-            changes: changes.map(([_, type, location, content]) => ({ type, location, content }))
-          }
-        }
-
-        case 'compose':
-        case 'sync': {
-          const fileMatch = content.match(/<file>\s*<path>(.*?)<\/path>\s*<content>(.*?)<\/content>\s*<\/file>/s)
-          if (!fileMatch) {
-            return { success: false, error: `Invalid ${responseType} response format` as const }
-          }
-          return {
-            success: true,
-            responseType,
-            path: fileMatch[1].trim(),
-            content: fileMatch[2].trim()
-          }
-        }
-
-        default:
-          return { success: false, error: `Unknown response type: ${responseType}` as const }
-      }
-    } catch (error) {
-      logger.error({ error }, 'Error parsing model response')
-      return { success: false, error: 'Failed to parse model response' as const }
+const parseModelResponse = task('parse_model_response', async (content: string) => {
+  try {
+    // First validate basic XML structure
+    if (!content.match(/<response type="[^"]+">.*?<\/response>/s)) {
+      return { success: false, error: 'Invalid XML format' as const }
     }
+
+    // Extract response type
+    const typeMatch = content.match(/<response type="([^"]+)">/s)
+    if (!typeMatch) {
+      return { success: false, error: 'Missing response type' as const }
+    }
+
+    const responseType = typeMatch[1]
+
+    switch (responseType) {
+      case 'tool': {
+        const toolMatch = content.match(
+          /<response type="tool">\s*<thought>(.*?)<\/thought>\s*<action>(.*?)<\/action>\s*<args>(.*?)<\/args>\s*<\/response>/s
+        )
+        if (!toolMatch) {
+          return { success: false, error: 'Invalid tool response format' as const }
+        }
+        const [_, thought, toolName, argsStr] = toolMatch
+        try {
+          const args = JSON.parse(argsStr.trim())
+          return { success: true, responseType, toolName, toolArgs: args, thought }
+        } catch (error) {
+          logger.error({ error }, 'Failed to parse tool arguments JSON')
+          return { success: false, error: 'Invalid JSON in tool arguments' as const }
+        }
+      }
+
+      case 'final':
+      case 'chat':
+      case 'thought':
+      case 'observation':
+      case 'feedback':
+      case 'error': {
+        const contentMatch = content.match(
+          new RegExp(
+            `<response type="${responseType}">\\s*<content>(.*?)<\\/content>\\s*<\\/response>`,
+            's'
+          )
+        )
+        if (!contentMatch) {
+          return { success: false, error: `Invalid ${responseType} response format` as const }
+        }
+        return {
+          success: true,
+          responseType,
+          content: contentMatch[1].trim(),
+          isFinal: responseType === 'final' || responseType === 'chat',
+        }
+      }
+
+      case 'edit': {
+        const fileMatch = content.match(/<file>(.*?)<\/file>/s)
+        const changes = Array.from(
+          content.matchAll(
+            /<change type="([^"]+)">\s*<location>(.*?)<\/location>\s*<content>(.*?)<\/content>\s*<\/change>/gs
+          )
+        )
+        if (!fileMatch || !changes.length) {
+          return { success: false, error: 'Invalid edit response format' as const }
+        }
+        return {
+          success: true,
+          responseType,
+          file: fileMatch[1].trim(),
+          changes: changes.map(([_, type, location, content]) => ({ type, location, content })),
+        }
+      }
+
+      case 'compose':
+      case 'sync': {
+        const fileMatch = content.match(
+          /<file>\s*<path>(.*?)<\/path>\s*<content>(.*?)<\/content>\s*<\/file>/s
+        )
+        if (!fileMatch) {
+          return { success: false, error: `Invalid ${responseType} response format` as const }
+        }
+        return {
+          success: true,
+          responseType,
+          path: fileMatch[1].trim(),
+          content: fileMatch[2].trim(),
+        }
+      }
+
+      default:
+        return { success: false, error: `Unknown response type: ${responseType}` as const }
+    }
+  } catch (error) {
+    logger.error({ error }, 'Error parsing model response')
+    return { success: false, error: 'Failed to parse model response' as const }
   }
-)
+})
 
 const createErrorState = (state: AgentState, errorMessage: string): AgentState => ({
   ...state,
-  messages: [...state.messages, new AIMessage(`<response type="error"><content>${errorMessage}</content></response>`)],
+  messages: [
+    ...state.messages,
+    new AIMessage(`<response type="error"><content>${errorMessage}</content></response>`),
+  ],
   status: 'end',
   isFinalAnswer: true,
-  modelResponse: new AIMessage(`<response type="error"><content>${errorMessage}</content></response>`),
+  modelResponse: new AIMessage(
+    `<response type="error"><content>${errorMessage}</content></response>`
+  ),
   toolFeedback: state.toolFeedback,
   action: null,
   observation: null,
-  userConfirmed: false
+  userConfirmed: false,
 })
 
 const executeAgentStep = task(
   'execute_agent_step',
   async (state: AgentState, runConfig?: RunnableConfig): Promise<AgentState> => {
     try {
-      const toolDescriptions = state.tools.map((tool: Tool) => `${tool.name}: ${tool.description}`).join('\n')
-      const messages = [new SystemMessage(SYSTEM_PROMPT.replace('{tools}', toolDescriptions)), ...state.messages]
+      const toolDescriptions = state.tools
+        .map((tool: Tool) => `${tool.name}: ${tool.description}`)
+        .join('\n')
+      const messages = [
+        new SystemMessage(SYSTEM_PROMPT.replace('{tools}', toolDescriptions)),
+        ...state.messages,
+      ]
 
       const modelResponse = await state.chatModel.invoke(messages, runConfig)
       let content = modelResponse.content.toString()
@@ -214,7 +241,11 @@ const executeAgentStep = task(
         let responseType = 'chat'
         let xmlContent = ''
 
-        if (content.includes('Tool execution requires confirmation') || content.includes('Tool:') || content.includes('Action:')) {
+        if (
+          content.includes('Tool execution requires confirmation') ||
+          content.includes('Tool:') ||
+          content.includes('Action:')
+        ) {
           responseType = 'tool'
           const toolMatch = content.match(/Tool:\s*(.*?)\s*Arguments?:\s*({.*})/s)
           if (toolMatch) {
@@ -222,25 +253,43 @@ const executeAgentStep = task(
           } else {
             xmlContent = `<thought>${content}</thought><action>unknown</action><args>{}</args>`
           }
-        } else if (content.includes('Edit file') || content.includes('Editing file') || content.includes('File edit:')) {
+        } else if (
+          content.includes('Edit file') ||
+          content.includes('Editing file') ||
+          content.includes('File edit:')
+        ) {
           responseType = 'edit'
-          const fileMatch = content.match(/(?:Edit file|Editing file|File edit:)\s*(.*?)\s*(?:Content|Changes):\s*(.*)/s)
+          const fileMatch = content.match(
+            /(?:Edit file|Editing file|File edit:)\s*(.*?)\s*(?:Content|Changes):\s*(.*)/s
+          )
           if (fileMatch) {
             xmlContent = `<file>${fileMatch[1]}</file><changes><change type="update"><location>1</location><content>${fileMatch[2]}</content></change></changes>`
           } else {
             xmlContent = `<file>unknown</file><changes><change type="update"><location>1</location><content>${content}</content></change></changes>`
           }
-        } else if (content.includes('Create file') || content.includes('Creating file') || content.includes('New file:')) {
+        } else if (
+          content.includes('Create file') ||
+          content.includes('Creating file') ||
+          content.includes('New file:')
+        ) {
           responseType = 'compose'
-          const fileMatch = content.match(/(?:Create file|Creating file|New file:)\s*(.*?)\s*(?:Content|Contents):\s*(.*)/s)
+          const fileMatch = content.match(
+            /(?:Create file|Creating file|New file:)\s*(.*?)\s*(?:Content|Contents):\s*(.*)/s
+          )
           if (fileMatch) {
             xmlContent = `<file><path>${fileMatch[1]}</path><content>${fileMatch[2]}</content></file>`
           } else {
             xmlContent = `<file><path>unknown</path><content>${content}</content></file>`
           }
-        } else if (content.includes('Directory:') || content.includes('Syncing') || content.includes('Sync:')) {
+        } else if (
+          content.includes('Directory:') ||
+          content.includes('Syncing') ||
+          content.includes('Sync:')
+        ) {
           responseType = 'sync'
-          const dirMatch = content.match(/(?:Directory:|Syncing|Sync:)\s*(.*?)\s*(?:Content|Contents):\s*(.*)/s)
+          const dirMatch = content.match(
+            /(?:Directory:|Syncing|Sync:)\s*(.*?)\s*(?:Content|Contents):\s*(.*)/s
+          )
           if (dirMatch) {
             xmlContent = `<file><path>${dirMatch[1]}</path><content>${dirMatch[2]}</content></file>`
           } else {
@@ -267,7 +316,10 @@ const executeAgentStep = task(
 
       const parseResult = await parseModelResponse(content)
       if (!parseResult.success) {
-        logger.error({ error: parseResult.error, threadId: state.threadId }, 'Failed to parse model response')
+        logger.error(
+          { error: parseResult.error, threadId: state.threadId },
+          'Failed to parse model response'
+        )
         return createErrorState(state, parseResult.error || 'Failed to parse model response')
       }
 
@@ -278,7 +330,10 @@ const executeAgentStep = task(
       switch (parseResult.responseType) {
         case 'final':
         case 'chat': {
-          logger.debug({ responseType: parseResult.responseType, threadId: state.threadId }, 'Handling chat/final response')
+          logger.debug(
+            { responseType: parseResult.responseType, threadId: state.threadId },
+            'Handling chat/final response'
+          )
           return {
             ...state,
             messages: [...state.messages, messageToAdd],
@@ -286,31 +341,48 @@ const executeAgentStep = task(
             isFinalAnswer: true,
             modelResponse: messageToAdd,
             toolFeedback: state.toolFeedback,
-            streamComplete: true
+            streamComplete: true,
           }
         }
 
         case 'tool': {
           logger.debug({ responseType: 'tool', threadId: state.threadId }, 'Handling tool response')
           const { toolName, toolArgs } = parseResult
-          const tool = state.tools.find((t) => t.name === toolName)
+          const tool = state.tools.find(t => t.name === toolName)
           if (!tool) {
             logger.error({ toolName, threadId: state.threadId }, 'Tool not found')
             return createErrorState(state, `Tool '${toolName}' not found`)
           }
 
           logger.debug({ toolName, threadId: state.threadId }, 'Running safety checks')
-          const safetyResult = await SafetyChecker.runSafetyChecks(toolName, toolArgs, state.safetyConfig)
+          const safetyResult = await SafetyChecker.runSafetyChecks(
+            toolName,
+            toolArgs,
+            state.safetyConfig
+          )
           if (!safetyResult.passed) {
-            logger.error({ toolName, reason: safetyResult.reason, threadId: state.threadId }, 'Safety check failed')
-            return createErrorState(state, `Tool execution blocked: ${safetyResult.reason || 'Safety check failed'}`)
+            logger.error(
+              { toolName, reason: safetyResult.reason, threadId: state.threadId },
+              'Safety check failed'
+            )
+            return createErrorState(
+              state,
+              `Tool execution blocked: ${safetyResult.reason || 'Safety check failed'}`
+            )
           }
 
           if (state.safetyConfig?.requireToolConfirmation) {
             logger.debug({ toolName, threadId: state.threadId }, 'Requesting tool confirmation')
-            const confirmationState = await UserInteractionManager.requestToolConfirmation(state, toolName, toolArgs)
+            const confirmationState = await UserInteractionManager.requestToolConfirmation(
+              state,
+              toolName,
+              toolArgs
+            )
             if (!confirmationState.userConfirmed) {
-              logger.error({ toolName, threadId: state.threadId }, 'Tool execution rejected by user')
+              logger.error(
+                { toolName, threadId: state.threadId },
+                'Tool execution rejected by user'
+              )
               return createErrorState(state, 'Tool execution rejected by user')
             }
           }
@@ -337,8 +409,8 @@ const executeAgentStep = task(
               ...state.configurable,
               thread_id: state.threadId,
               checkpoint_ns: 'react_agent',
-              [Symbol.toStringTag]: 'AgentConfigurable' as const
-            }
+              [Symbol.toStringTag]: 'AgentConfigurable' as const,
+            },
           }
 
           if (state.safetyConfig?.requireToolFeedback) {
@@ -351,14 +423,16 @@ const executeAgentStep = task(
             )
             return {
               ...updatedState,
-              messages: feedbackState.messages.map(msg => {
+              messages: feedbackState.messages.map((msg: BaseMessage) => {
                 // Ensure feedback messages are in XML format
                 if (msg.content.toString().startsWith('<response')) {
                   return msg
                 }
-                return new AIMessage(`<response type="feedback"><content>${msg.content}</content></response>`)
+                return new AIMessage(
+                  `<response type="feedback"><content>${msg.content}</content></response>`
+                )
               }),
-              toolFeedback: feedbackState.toolFeedback || state.toolFeedback
+              toolFeedback: feedbackState.toolFeedback || state.toolFeedback,
             }
           }
 
@@ -368,7 +442,10 @@ const executeAgentStep = task(
         case 'thought':
         case 'observation':
         case 'feedback': {
-          logger.debug({ responseType: parseResult.responseType, threadId: state.threadId }, 'Handling thought/observation/feedback response')
+          logger.debug(
+            { responseType: parseResult.responseType, threadId: state.threadId },
+            'Handling thought/observation/feedback response'
+          )
           return {
             ...state,
             messages: [...state.messages, messageToAdd],
@@ -376,16 +453,21 @@ const executeAgentStep = task(
             isFinalAnswer: false,
             modelResponse: messageToAdd,
             toolFeedback: state.toolFeedback,
-            streamComplete: false
+            streamComplete: false,
           }
         }
 
         case 'edit':
         case 'compose':
         case 'sync': {
-          logger.debug({ responseType: parseResult.responseType, threadId: state.threadId }, 'Handling edit/compose/sync response')
+          logger.debug(
+            { responseType: parseResult.responseType, threadId: state.threadId },
+            'Handling edit/compose/sync response'
+          )
           // Add a final response to indicate completion
-          const finalMessage = new AIMessage(`<response type="final"><content>Operation complete</content></response>`)
+          const finalMessage = new AIMessage(
+            `<response type="final"><content>Operation complete</content></response>`
+          )
           return {
             ...state,
             messages: [...state.messages, messageToAdd, finalMessage],
@@ -393,12 +475,15 @@ const executeAgentStep = task(
             isFinalAnswer: true,
             modelResponse: messageToAdd,
             toolFeedback: state.toolFeedback,
-            streamComplete: true
+            streamComplete: true,
           }
         }
 
         default:
-          logger.error({ responseType: parseResult.responseType, threadId: state.threadId }, 'Unknown response type')
+          logger.error(
+            { responseType: parseResult.responseType, threadId: state.threadId },
+            'Unknown response type'
+          )
           return createErrorState(state, `Unknown response type: ${parseResult.responseType}`)
       }
     } catch (error) {
@@ -410,10 +495,12 @@ const executeAgentStep = task(
 
 export function createReActAgent(config: FunctionalReActConfig) {
   // Initialize chat model first and validate it
-  const chatModel = config.chatModel || new ChatOllama({
-    model: config.modelName || DEFAULT_AGENT_CONFIG.modelName,
-    baseUrl: config.host || DEFAULT_AGENT_CONFIG.host
-  })
+  const chatModel =
+    config.chatModel ||
+    new ChatOllama({
+      model: config.modelName || DEFAULT_AGENT_CONFIG.modelName,
+      baseUrl: config.host || DEFAULT_AGENT_CONFIG.host,
+    })
   logger.debug({ modelName: config.modelName, host: config.host }, 'Created chat model')
 
   // Validate chat model
@@ -422,121 +509,81 @@ export function createReActAgent(config: FunctionalReActConfig) {
   }
 
   // In test environment, disable user interaction requirements
-  const safetyConfig: SafetyConfig = process.env.NODE_ENV === 'test' ? {
-    ...DEFAULT_AGENT_CONFIG.safetyConfig,
-    requireToolConfirmation: false,
-    requireToolFeedback: false,
-    maxInputLength: DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength,
-    dangerousToolPatterns: DEFAULT_AGENT_CONFIG.safetyConfig.dangerousToolPatterns
-  } : {
-    ...DEFAULT_AGENT_CONFIG.safetyConfig,
-    ...(config.safetyConfig || {})
-  }
+  const safetyConfig: SafetyConfig =
+    process.env.NODE_ENV === 'test'
+      ? {
+          ...DEFAULT_AGENT_CONFIG.safetyConfig,
+          requireToolConfirmation: false,
+          requireToolFeedback: false,
+          maxInputLength: DEFAULT_AGENT_CONFIG.safetyConfig.maxInputLength,
+          dangerousToolPatterns: DEFAULT_AGENT_CONFIG.safetyConfig.dangerousToolPatterns,
+        }
+      : {
+          ...DEFAULT_AGENT_CONFIG.safetyConfig,
+          ...(config.safetyConfig || {}),
+        }
 
   const maxIterations = config.maxIterations || DEFAULT_AGENT_CONFIG.maxIterations
 
   return entrypoint(
     {
       checkpointer: config.memoryPersistence || new MemorySaver(),
-      name: 'react_agent'
+      name: 'react_agent',
     },
     async (input: AgentInput, runConfig?: RunnableConfig): Promise<AgentOutput> => {
-      if (!config.threadId) {
-        throw new Error('threadId is required')
-      }
-
       // Create a base configurable that will be used throughout the agent's lifecycle
       const baseConfigurable = {
-        thread_id: config.threadId,
+        thread_id:
+          runConfig?.configurable?.thread_id ||
+          config.threadId ||
+          input.configurable?.thread_id ||
+          uuidv4(),
         checkpoint_ns: 'react_agent',
-        [Symbol.toStringTag]: 'AgentConfigurable' as const
+        [Symbol.toStringTag]: 'AgentConfigurable' as const,
       }
 
-      // Merge configurable objects, ensuring thread_id is preserved
-      const configurable = {
-        ...baseConfigurable,
-        ...input.configurable,
-        ...runConfig?.configurable,
-        thread_id: config.threadId // Ensure thread_id is not overridden
-      }
-
-      // Create a new runConfig that will be used for all operations
-      const newRunConfig: RunnableConfig = {
-        ...runConfig,
-        configurable
-      }
-
-      // Ensure we have at least one message and it's properly formatted
-      const initialMessages = input.messages?.length ? input.messages : [
-        new SystemMessage(SYSTEM_PROMPT.replace('{tools}', tools.map(t => `${t.name}: ${t.description}`).join('\n')))
-      ]
-
+      // Initialize agent state
       const initialState: AgentState = {
-        messages: initialMessages,
+        messages: input.messages.map(msg => {
+          if (typeof msg === 'string') {
+            return new SystemMessage(msg)
+          }
+          return msg
+        }),
         iterations: 0,
-        status: 'continue' as const,
+        status: 'continue',
         isFinalAnswer: false,
         safetyConfig,
         tools,
         chatModel,
         maxIterations,
-        threadId: config.threadId,
-        configurable,
+        threadId: baseConfigurable.thread_id,
+        configurable: baseConfigurable,
         modelResponse: null,
         action: null,
         observation: null,
         toolFeedback: {},
-        userConfirmed: false
+        userConfirmed: false,
+        streamComplete: false,
       }
 
-      let state = initialState
-      try {
-        // Validate chat model can be invoked
-        await chatModel.invoke([new SystemMessage('test')]).catch(error => {
-          logger.error({ error }, 'Failed to invoke chat model')
-          throw new Error('Failed to invoke chat model: ' + (error instanceof Error ? error.message : 'Unknown error'))
+      // Execute agent steps until completion
+      let currentState = initialState
+      while (currentState.status === 'continue' && currentState.iterations < maxIterations) {
+        currentState = await executeAgentStep(currentState, {
+          ...runConfig,
+          configurable: baseConfigurable,
         })
+      }
 
-        while (state.status === 'continue' && state.iterations < maxIterations) {
-          // Pass the runConfig to executeAgentStep
-          state = await executeAgentStep(state, newRunConfig)
-        }
-
-        // If we have no messages at this point, add a default response
-        if (!state.messages.length) {
-          const defaultResponse = new AIMessage('<response type="chat"><content>I apologize, but I was unable to process your request. Please try again.</content></response>')
-          state.messages.push(defaultResponse)
-          state.status = 'end'
-          state.isFinalAnswer = true
-        }
-
-        return {
-          messages: state.messages,
-          status: state.status,
-          toolFeedback: state.toolFeedback,
-          iterations: state.iterations,
-          threadId: state.threadId,
-          configurable: {
-            ...baseConfigurable,
-            ...state.configurable,
-            thread_id: state.threadId
-          }
-        }
-      } catch (error) {
-        logger.error({ error }, 'Agent execution failed')
-        const errorResponse = new AIMessage(`<response type="error"><content>Error: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)
-        return {
-          messages: [errorResponse],
-          status: 'end',
-          toolFeedback: {},
-          iterations: state.iterations,
-          threadId: state.threadId,
-          configurable: {
-            ...baseConfigurable,
-            ...state.configurable,
-            thread_id: state.threadId
-          }
-        }
+      // Return final output
+      return {
+        messages: currentState.messages,
+        status: currentState.status,
+        toolFeedback: currentState.toolFeedback,
+        iterations: currentState.iterations,
+        threadId: currentState.threadId,
+        configurable: currentState.configurable,
       }
     }
   )

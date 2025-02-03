@@ -1,5 +1,6 @@
 import { Tool } from '@langchain/core/tools'
-import { logger } from '@/utils/logger'
+import { logger } from '@/logger'
+import { createContext, runInContext } from 'vm'
 
 interface TypeScriptExecutionConfig {
   maxIterations?: number
@@ -15,11 +16,19 @@ interface ExecutionContext {
   }
   output: string[]
   iterations: number
+  lastValue: any
+}
+
+interface ErrorDetails {
+  name?: string
+  message?: string
+  stack?: string
+  error?: unknown
 }
 
 export class TypeScriptExecutionTool extends Tool {
   name = 'typescript-execution'
-  description = 'Execute TypeScript code and return the result'
+  description = 'Execute TypeScript code in a secure environment and return the result'
   private config: TypeScriptExecutionConfig
   private currentContext: ExecutionContext | null = null
 
@@ -27,18 +36,28 @@ export class TypeScriptExecutionTool extends Tool {
     super()
     this.config = {
       maxIterations: config.maxIterations || 1000,
-      maxOutputLength: config.maxOutputLength || 1000
+      maxOutputLength: config.maxOutputLength || 1000,
     }
   }
 
   async _call(input: string): Promise<string> {
     try {
-      logger.debug('Executing TypeScript code')
+      logger.debug('Executing TypeScript code', { input })
       const result = await this.executeCode(input)
+      logger.debug('Execution complete', { result })
       return result
     } catch (error) {
-      logger.error({ error }, 'TypeScript execution failed')
-      return `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      const errorDetails: ErrorDetails =
+        error instanceof Error
+          ? {
+              name: error.name,
+              message: error.message,
+              stack: error.stack,
+            }
+          : { error }
+
+      logger.error('TypeScript execution failed', { errorDetails })
+      throw error
     }
   }
 
@@ -50,34 +69,41 @@ export class TypeScriptExecutionTool extends Tool {
           log: (...args: any[]) => this.captureOutput(args),
           error: (...args: any[]) => this.captureOutput(args, 'error'),
           warn: (...args: any[]) => this.captureOutput(args, 'warn'),
-          info: (...args: any[]) => this.captureOutput(args, 'info')
+          info: (...args: any[]) => this.captureOutput(args, 'info'),
         },
         output: [],
-        iterations: 0
+        iterations: 0,
+        lastValue: undefined,
       }
 
-      // Execute code in context
-      const result = await this.runInContext(code, this.currentContext)
-      return this.currentContext.output.join('\n') || String(result)
+      // Create a secure VM context
+      const vmContext = createContext({
+        console: this.currentContext.console,
+      })
+
+      // Execute code in secure context
+      this.currentContext.lastValue = runInContext(code, vmContext, {
+        timeout: 1000, // 1 second timeout
+        displayErrors: true,
+      })
+
+      const output = this.currentContext.output.join('\n')
+      const result = this.currentContext.lastValue
+      return output ? `${output}\n${result}` : String(result)
     } catch (error) {
+      const errorDetails: ErrorDetails =
+        error instanceof Error
+          ? {
+              name: error.name,
+              message: error.message,
+              stack: error.stack,
+            }
+          : { error }
+
+      logger.error('Code execution failed', { errorDetails, code })
       throw error
     } finally {
       this.currentContext = null
-    }
-  }
-
-  private async runInContext(code: string, context: ExecutionContext): Promise<any> {
-    const wrappedCode = `
-      with (context) {
-        ${code}
-      }
-    `
-
-    try {
-      const fn = new Function('context', wrappedCode)
-      return fn(context)
-    } catch (error) {
-      throw new Error(`Code execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
   }
 
@@ -86,14 +112,16 @@ export class TypeScriptExecutionTool extends Tool {
       throw new Error('No active execution context')
     }
 
-    const output = args.map(arg => {
-      if (typeof arg === 'string') return arg
-      try {
-        return JSON.stringify(arg)
-      } catch {
-        return String(arg)
-      }
-    }).join(' ')
+    const output = args
+      .map(arg => {
+        if (typeof arg === 'string') return arg
+        try {
+          return JSON.stringify(arg)
+        } catch {
+          return String(arg)
+        }
+      })
+      .join(' ')
 
     if (output.length > this.config.maxOutputLength!) {
       throw new Error('Output exceeds maximum length')

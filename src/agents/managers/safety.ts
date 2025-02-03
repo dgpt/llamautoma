@@ -1,21 +1,8 @@
 import { task } from '@langchain/langgraph'
-import { SafetyConfig, SafetyCheckResult } from '../../../types/agent'
-import { logger } from '../../../utils/logger'
+import { SafetyConfig, SafetyCheckResult } from '@/types/agent'
+import { logger } from '@/logger'
 
 // Constants
-const DEFAULT_MAX_INPUT_LENGTH = 10000
-const DEFAULT_DANGEROUS_PATTERNS = [
-  'drop',
-  'truncate',
-  'exec',
-  'curl',
-  'wget',
-  'bash -c',
-  'rm -rf /',
-  'zsh -c',
-  'sh -c',
-]
-
 // Check input length
 const checkInputLength = task(
   'check_input_length',
@@ -25,7 +12,11 @@ const checkInputLength = task(
         return { passed: false, reason: 'Input is empty' }
       }
       if (input.length > maxLength) {
-        return { passed: false, reason: `Input length (${input.length}) exceeds maximum length (${maxLength})` }
+        return {
+          passed: false,
+          reason: `Input length (${input.length}) exceeds maximum length (${maxLength})`,
+          warnings: [`Input length (${input.length}) exceeds maximum length (${maxLength})`],
+        }
       }
       return { passed: true }
     } catch (error) {
@@ -33,6 +24,9 @@ const checkInputLength = task(
       return {
         passed: false,
         reason: `Input length check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        warnings: [
+          `Input length check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        ],
       }
     }
   }
@@ -44,12 +38,16 @@ const checkDangerousPatterns = task(
   async (toolName: string, input: string, patterns: string[]): Promise<SafetyCheckResult> => {
     try {
       const combinedInput = `${toolName} ${input}`.toLowerCase()
-      const foundPatterns = patterns.filter((pattern) => combinedInput.includes(pattern.toLowerCase()))
+      const foundPatterns = patterns.filter(pattern =>
+        combinedInput.includes(pattern.toLowerCase())
+      )
 
       if (foundPatterns.length > 0) {
+        const warnings = foundPatterns.map(pattern => `Dangerous pattern detected: ${pattern}`)
         return {
           passed: false,
           reason: `Input contains dangerous patterns: ${foundPatterns.join(', ')}`,
+          warnings,
         }
       }
       return { passed: true }
@@ -58,22 +56,9 @@ const checkDangerousPatterns = task(
       return {
         passed: false,
         reason: `Pattern check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      }
-    }
-  }
-)
-
-// Run custom safety checks
-const runCustomChecks = task(
-  'run_custom_checks',
-  async (toolName: string, input: string, config: SafetyConfig): Promise<SafetyCheckResult> => {
-    try {
-      return { passed: true }
-    } catch (error) {
-      logger.error({ error }, 'Error running custom safety checks')
-      return {
-        passed: false,
-        reason: 'Safety check system error',
+        warnings: [
+          `Pattern check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        ],
       }
     }
   }
@@ -81,15 +66,23 @@ const runCustomChecks = task(
 
 // Main safety checker
 export const SafetyChecker = {
-  async runSafetyChecks(toolName: string, input: string, config: SafetyConfig): Promise<SafetyCheckResult> {
+  async runSafetyChecks(
+    toolName: string,
+    input: string,
+    config: SafetyConfig
+  ): Promise<SafetyCheckResult> {
     try {
       // Validate inputs
       if (!toolName) {
-        return { passed: false, reason: 'Tool name is required' }
+        return {
+          passed: false,
+          reason: 'Tool name is required',
+          warnings: ['Tool name is required'],
+        }
       }
 
       if (input === undefined || input === null) {
-        return { passed: false, reason: 'Input is required' }
+        return { passed: false, reason: 'Input is required', warnings: ['Input is required'] }
       }
 
       // Parse input if it's a JSON string
@@ -102,6 +95,8 @@ export const SafetyChecker = {
         }
       }
 
+      const warnings: string[] = []
+
       // Check input length
       const maxLength = config.maxInputLength
       const lengthResult = await checkInputLength(
@@ -109,7 +104,7 @@ export const SafetyChecker = {
         maxLength
       )
       if (!lengthResult.passed) {
-        return lengthResult
+        warnings.push(...(lengthResult.warnings || []))
       }
 
       // Check dangerous patterns
@@ -120,17 +115,16 @@ export const SafetyChecker = {
         dangerousPatterns
       )
       if (!patternResult.passed) {
-        return patternResult
+        warnings.push(...(patternResult.warnings || []))
       }
 
-      // Run custom checks
-      const customResult = await runCustomChecks(
-        toolName,
-        typeof parsedInput === 'string' ? parsedInput : JSON.stringify(parsedInput),
-        config
-      )
-      if (!customResult.passed) {
-        return customResult
+      // If any checks failed, return failure with all warnings
+      if (!lengthResult.passed || !patternResult.passed) {
+        return {
+          passed: false,
+          reason: 'Safety checks failed',
+          warnings,
+        }
       }
 
       return { passed: true }
@@ -139,7 +133,10 @@ export const SafetyChecker = {
       return {
         passed: false,
         reason: `Safety check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        warnings: [
+          `Safety check error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        ],
       }
     }
-  }
+  },
 }

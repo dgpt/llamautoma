@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { BaseReActTool } from './baseTool'
+import { BaseReActTool } from '@/agents/tools/baseTool'
 
 /**
  * Tool for interacting with the file system

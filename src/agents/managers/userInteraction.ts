@@ -1,17 +1,17 @@
-import { HumanMessage, AIMessage } from '@langchain/core/messages'
-import { AgentState, SafetyCheckResult, ToolExecutionResult } from '../types'
-import { logger } from '../../../utils/logger'
-import { BaseMessage } from '@langchain/core/messages'
+import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages'
+import { AgentState, SafetyCheckResult, ToolExecutionResult } from '@/types/agent'
+import { logger } from '@/logger'
+import { formatXMLResponse } from '@/xml'
 
 // Wait for user input with timeout
 const waitForUserInput = async (
-  state: AgentState,
+  state: AgentState
 ): Promise<{ messages: BaseMessage[]; userInput?: string }> => {
   // In test environment, bypass user input
   if (process.env.NODE_ENV === 'test') {
     return {
       messages: [...state.messages],
-      userInput: 'yes' // Default to 'yes' in test environment
+      userInput: 'yes', // Default to 'yes' in test environment
     }
   }
 
@@ -47,7 +47,7 @@ const waitForUserInput = async (
 
     return {
       messages: [...state.messages, new HumanMessage(userInput)],
-      userInput
+      userInput,
     }
   } catch (error) {
     logger.error({ error }, 'Error waiting for user input')
@@ -55,9 +55,11 @@ const waitForUserInput = async (
     return {
       messages: [
         ...state.messages,
-        new AIMessage(`<response type="error"><content>Error: ${errorMessage}</content></response>`)
+        new AIMessage(
+          `<response type="error"><content>Error: ${errorMessage}</content></response>`
+        ),
       ],
-      userInput: undefined
+      userInput: undefined,
     }
   } finally {
     if (!signal.aborted) {
@@ -68,41 +70,64 @@ const waitForUserInput = async (
 
 export const UserInteractionManager = {
   waitForUserInput,
-  async requestToolConfirmation(state: AgentState, toolName: string, toolArgs: string): Promise<AgentState> {
+  async requestToolConfirmation(
+    state: AgentState,
+    toolName: string,
+    toolArgs: Record<string, unknown>
+  ): Promise<{ messages: BaseMessage[]; userConfirmed: boolean }> {
     try {
-      // In test environment, bypass confirmation
+      // In test environment, auto-confirm
       if (process.env.NODE_ENV === 'test') {
+        const confirmationMessage = new AIMessage(
+          formatXMLResponse('confirmation', `Tool execution confirmed: ${toolName}`)
+        )
         return {
-          ...state,
-          messages: [...state.messages],
-          userConfirmed: true
+          messages: [...state.messages, confirmationMessage],
+          userConfirmed: true,
         }
       }
 
-      const messages = [...state.messages]
-      messages.push(
-        new AIMessage(
-          `<response type="chat"><content>Tool execution requires confirmation:\nTool: ${toolName}\nArguments: ${toolArgs}\nPlease confirm (yes/no):</content></response>`
+      const confirmationRequest = new AIMessage(
+        formatXMLResponse(
+          'confirmation',
+          `Do you want to execute tool ${toolName} with args ${JSON.stringify(toolArgs)}?`
         )
       )
 
-      const confirmationState = await waitForUserInput({ ...state, messages })
-      const userConfirmed = confirmationState.userInput?.toLowerCase() === 'yes'
+      const stateWithRequest = {
+        ...state,
+        messages: [...state.messages, confirmationRequest],
+      }
+
+      // Wait for confirmation
+      logger.info({ toolName, toolArgs }, 'Requesting tool execution confirmation')
+      const confirmationResult = await waitForUserInput(stateWithRequest)
+
+      const confirmed = confirmationResult.userInput?.toLowerCase() === 'yes'
+      const confirmationMessage = new AIMessage(
+        formatXMLResponse(
+          'confirmation',
+          confirmed ? 'Tool execution confirmed' : 'Tool execution rejected'
+        )
+      )
 
       return {
-        ...state,
-        messages: confirmationState.messages,
-        userConfirmed
+        messages: [...confirmationResult.messages, confirmationMessage],
+        userConfirmed: confirmed,
       }
     } catch (error) {
       logger.error({ error, toolName }, 'Error requesting tool confirmation')
       return {
-        ...state,
         messages: [
           ...state.messages,
-          new AIMessage(`<response type="error"><content>Error requesting confirmation: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)
+          new AIMessage(
+            formatXMLResponse(
+              'error',
+              `Error requesting confirmation: ${error instanceof Error ? error.message : 'Unknown error'}`
+            )
+          ),
         ],
-        userConfirmed: false
+        userConfirmed: false,
       }
     }
   },
@@ -112,16 +137,19 @@ export const UserInteractionManager = {
     toolName: string,
     result: ToolExecutionResult,
     safetyResult?: SafetyCheckResult
-  ): Promise<{ messages: BaseMessage[]; toolFeedback?: Record<string, string> }> {
+  ): Promise<{ messages: BaseMessage[]; toolFeedback?: Record<string, unknown> }> {
     try {
-      // In test environment, bypass feedback
+      // In test environment, provide test feedback
       if (process.env.NODE_ENV === 'test') {
+        const feedbackMessage = new AIMessage(
+          formatXMLResponse('feedback', `Test feedback for tool: ${toolName}`)
+        )
         return {
-          messages: state.messages,
+          messages: [...state.messages, feedbackMessage],
           toolFeedback: {
             ...state.toolFeedback,
-            [toolName]: 'Test feedback'
-          }
+            [toolName]: 'Test feedback',
+          },
         }
       }
 
@@ -129,13 +157,19 @@ export const UserInteractionManager = {
       if (result.success) {
         messagesWithResult.push(
           new AIMessage(
-            `<response type="chat"><content>Tool execution successful:\nTool: ${toolName}\nResult: ${result.output}</content></response>`
+            formatXMLResponse(
+              'chat',
+              `Tool execution successful:\nTool: ${toolName}\nResult: ${result.output}`
+            )
           )
         )
       } else {
         messagesWithResult.push(
           new AIMessage(
-            `<response type="error"><content>Tool execution failed:\nTool: ${toolName}\nError: ${result.error}</content></response>`
+            formatXMLResponse(
+              'error',
+              `Tool execution failed:\nTool: ${toolName}\nError: ${result.error}`
+            )
           )
         )
       }
@@ -143,43 +177,55 @@ export const UserInteractionManager = {
       if (safetyResult?.warnings?.length) {
         messagesWithResult.push(
           new AIMessage(
-            `<response type="chat"><content>Safety warnings:\n${safetyResult.warnings.join('\n')}</content></response>`
+            formatXMLResponse('warning', `Safety warnings:\n${safetyResult.warnings.join('\n')}`)
           )
         )
       }
 
       const feedbackMessage = new AIMessage(
-        `<response type="chat"><content>Please provide feedback for tool execution (or type 'ERROR' to report an issue):</content></response>`
+        formatXMLResponse(
+          'feedback',
+          'Please provide feedback for tool execution (or type "ERROR" to report an issue):'
+        )
       )
 
       const stateWithRequest = {
         ...state,
-        messages: [...messagesWithResult, feedbackMessage]
+        messages: [...messagesWithResult, feedbackMessage],
       }
 
       // Wait for feedback
       logger.info({ toolName, result, safetyResult }, 'Requesting tool execution feedback')
       const feedbackResult = await waitForUserInput(stateWithRequest)
 
+      const finalFeedbackMessage = new AIMessage(
+        formatXMLResponse('feedback', feedbackResult.userInput || 'No feedback provided')
+      )
+
       return {
-        messages: feedbackResult.messages,
+        messages: [...feedbackResult.messages, finalFeedbackMessage],
         toolFeedback:
           feedbackResult.userInput === 'ERROR'
             ? undefined
             : {
                 ...state.toolFeedback,
-                [toolName]: feedbackResult.userInput || 'No feedback'
-              }
+                [toolName]: feedbackResult.userInput || 'No feedback',
+              },
       }
     } catch (error) {
       logger.error({ error, toolName }, 'Error handling tool feedback')
       return {
         messages: [
-          ...(state?.messages || []),
-          new AIMessage(`<response type="error"><content>Error handling feedback: ${error instanceof Error ? error.message : 'Unknown error'}</content></response>`)
+          ...state.messages,
+          new AIMessage(
+            formatXMLResponse(
+              'error',
+              `Error handling feedback: ${error instanceof Error ? error.message : 'Unknown error'}`
+            )
+          ),
         ],
-        toolFeedback: undefined
+        toolFeedback: state.toolFeedback,
       }
     }
-  }
+  },
 }

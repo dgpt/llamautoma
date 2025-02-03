@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { BaseReActTool } from './baseTool'
+import { BaseReActTool } from '@/agents/tools/baseTool'
 
 export class CalculatorTool extends BaseReActTool {
   name = 'calculator'

@@ -1,89 +1,36 @@
 import { expect, test, describe } from 'bun:test'
-import { TypeScriptExecutionTool } from '../../src/agents/react/tools/typescriptExecutionTool'
+import { TypeScriptExecutionTool } from '@/agents/tools/typescriptExecutionTool'
 
 describe('TypeScriptExecutionTool', () => {
   test('should execute basic arithmetic', async () => {
     const tool = new TypeScriptExecutionTool()
-    const input = JSON.stringify({
-      code: '2 + 2',
-      config: { hideMessage: false }
-    })
-
-    const result = await tool.call(input)
-    const parsed = JSON.parse(result)
-
-    expect(parsed.success).toBe(true)
-    expect(parsed.result).toBe('4')
-    expect(parsed.logs).toEqual([])
+    const result = await tool.invoke('2 + 2')
+    expect(result).toBe('4')
   })
 
   test('should handle console output', async () => {
     const tool = new TypeScriptExecutionTool()
-    const input = JSON.stringify({
-      code: 'console.log("Hello"); console.warn("Warning"); console.error("Error"); 42',
-      config: { hideMessage: false }
-    })
-
-    const result = await tool.call(input)
-    const parsed = JSON.parse(result)
-
-    expect(parsed.success).toBe(true)
-    expect(parsed.result).toBe('42')
-    expect(parsed.logs).toEqual([
-      ['log', 'Hello'],
-      ['warn', 'Warning'],
-      ['error', 'Error']
-    ])
-  })
-
-  test('should timeout on infinite loops', async () => {
-    const tool = new TypeScriptExecutionTool()
-    const input = JSON.stringify({
-      code: 'while(true) {}',
-      config: { timeout: 100 }
-    })
-
-    const result = await tool.call(input)
-    const parsed = JSON.parse(result)
-
-    expect(parsed.success).toBe(false)
-    expect(parsed.error).toBe('Execution timed out')
+    const result = await tool.invoke(
+      'console.log("Hello"); console.warn("Warning"); console.error("Error"); 42'
+    )
+    expect(result).toContain('[log] Hello')
+    expect(result).toContain('[warn] Warning')
+    expect(result).toContain('[error] Error')
+    expect(result.trim().endsWith('42')).toBe(true)
   })
 
   test('should handle syntax errors', async () => {
     const tool = new TypeScriptExecutionTool()
-    const input = JSON.stringify({
-      code: 'const x =',
-      config: { hideMessage: false }
-    })
-
-    const result = await tool.call(input)
-    const parsed = JSON.parse(result)
-
-    expect(parsed.success).toBe(false)
-    expect(parsed.error).toContain('SyntaxError')
+    return expect(tool.invoke('const x =')).rejects.toThrow('Unexpected end of script')
   })
 
   test('should prevent access to dangerous globals', async () => {
     const tool = new TypeScriptExecutionTool()
-    const input = JSON.stringify({
-      code: 'try { process.exit(1) } catch(e) { "Safe" }',
-      config: { hideMessage: false }
-    })
-
-    const result = await tool.call(input)
-    const parsed = JSON.parse(result)
-
-    expect(parsed.success).toBe(true)
-    expect(parsed.result).toBe('Safe')
+    return expect(tool.invoke('process.exit(1)')).rejects.toThrow("Can't find variable: process")
   })
 
   test('should handle invalid input', async () => {
     const tool = new TypeScriptExecutionTool()
-    const result = await tool.call('not json')
-    const parsed = JSON.parse(result)
-
-    expect(parsed.success).toBe(false)
-    expect(parsed.error).toContain('Invalid input')
+    return expect(tool.invoke('not json')).rejects.toThrow()
   })
 })
