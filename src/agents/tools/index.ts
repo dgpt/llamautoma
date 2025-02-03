@@ -1,10 +1,9 @@
-import { FileSystemTool } from './fileSystemTool'
 import { TypeScriptExecutionTool } from './typescriptExecutionTool'
 
 /**
  * All available tools for the ReAct agent
  */
-const AGENT_TOOLS = [new FileSystemTool(), new TypeScriptExecutionTool()]
+const AGENT_TOOLS = [new TypeScriptExecutionTool()]
 
 /**
  * Type for all available tools

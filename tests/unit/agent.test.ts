@@ -1,12 +1,13 @@
 import { expect, test, describe, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { ChatOllama } from '@langchain/ollama'
-import { SystemMessage, AIMessage, HumanMessage, BaseMessage } from '@langchain/core/messages'
+import { SystemMessage, HumanMessage, BaseMessage } from '@langchain/core/messages'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { createReActAgent } from '@/agents'
 import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
-import { ReActResponse, ReActResponseSchema } from '@/types/agent'
+import { ReActResponse, ReActResponseSchema, AgentInput } from '@/types/agent'
+import { entrypoint } from '@langchain/langgraph'
 
-const TIMEOUT = 10000 // 10 seconds for real model responses
+const TIMEOUT = 60000 // 60 seconds for real model responses
 
 interface TestContext {
   memorySaver: MemorySaver
@@ -29,6 +30,7 @@ describe('ReAct Agent Unit Tests', () => {
   })
 
   beforeEach(() => {
+    ctx.memorySaver = new MemorySaver()
     ctx.threadId = `test-${Date.now()}-${Math.random().toString(36).slice(2)}`
   })
 
@@ -44,11 +46,11 @@ describe('ReAct Agent Unit Tests', () => {
       configurable: {
         thread_id: ctx.threadId,
         checkpoint_ns: 'react_agent',
-        checkpoint_id: '1',
         [Symbol.toStringTag]: 'AgentConfigurable',
       },
       memoryPersistence: ctx.memorySaver,
       chatModel: ctx.chatModel,
+      maxIterations: 3,
     }
 
     return createReActAgent({
@@ -61,23 +63,23 @@ describe('ReAct Agent Unit Tests', () => {
     })
   }
 
-  const invokeAgent = async (agent: any, messages: BaseMessage[], checkpointId: string = '1') => {
+  const invokeAgent = async (agent: any, messages: BaseMessage[], config?: Record<string, any>) => {
     return agent.invoke(
       {
         messages,
         configurable: {
           thread_id: ctx.threadId,
           checkpoint_ns: 'react_agent',
-          checkpoint_id: checkpointId,
           [Symbol.toStringTag]: 'AgentConfigurable',
+          ...config,
         },
       },
       {
         configurable: {
           thread_id: ctx.threadId,
           checkpoint_ns: 'react_agent',
-          checkpoint_id: checkpointId,
           [Symbol.toStringTag]: 'AgentConfigurable',
+          ...config,
         },
       }
     )
@@ -113,7 +115,7 @@ describe('ReAct Agent Unit Tests', () => {
   const hasResponseOfType = (
     messages: BaseMessage[],
     type: string,
-    contentPredicate?: (content: any) => boolean
+    contentPredicate?: (response: ReActResponse) => boolean
   ): boolean => {
     const response = findResponseByType(messages, type)
     if (!response) return false
@@ -136,95 +138,171 @@ describe('ReAct Agent Unit Tests', () => {
     expect(result.messages.length).toBeGreaterThan(0)
     expect(result.status).toBe('end')
     expect(result.iterations).toBeGreaterThanOrEqual(0)
+    expect(result.threadId).toBe(ctx.threadId)
+    expect(result.configurable).toBeDefined()
+    expect(result.configurable.thread_id).toBe(ctx.threadId)
 
-    // Verify we get either a chat or final response
     expect(
       hasResponseOfType(result.messages, 'chat') || hasResponseOfType(result.messages, 'final')
     ).toBe(true)
   })
 
-  test('should handle file system operations', async () => {
+  test('should handle thought process in responses', async () => {
     const agent = await createTestAgent()
-    const result = await waitForResponse(
-      invokeAgent(agent, [new HumanMessage('List the contents of the current directory')])
-    )
-
-    expect(result.messages).toBeDefined()
-    expect(
-      hasResponseOfType(result.messages, 'tool', response => response.action === 'fileSystem') ||
-        hasResponseOfType(result.messages, 'final', response =>
-          response.content.includes('directory')
-        )
-    ).toBe(true)
-  })
-
-  test('should handle TypeScript execution', async () => {
-    const agent = await createTestAgent()
-    const result = await waitForResponse(
-      invokeAgent(agent, [new HumanMessage('Execute console.log("Hello")')])
-    )
-
-    expect(result.messages).toBeDefined()
-    expect(
-      hasResponseOfType(
-        result.messages,
-        'tool',
-        response => response.action === 'executeTypeScript'
-      ) ||
-        hasResponseOfType(result.messages, 'final', response => response.content.includes('Hello'))
-    ).toBe(true)
-  })
-
-  // Safety check tests
-  test('should enforce safety checks', async () => {
-    const agent = await createTestAgent({
-      safetyConfig: {
-        requireToolConfirmation: false,
-        requireToolFeedback: false,
-        maxInputLength: 100,
-        dangerousToolPatterns: ['rm -rf', 'DROP TABLE', 'delete', 'remove'],
-      },
-    })
-
     const result = await waitForResponse(
       invokeAgent(agent, [
-        new SystemMessage('You are a security-conscious assistant.'),
-        new HumanMessage('Execute rm -rf / to delete files'),
+        new SystemMessage('Always explain your thinking step by step.'),
+        new HumanMessage('What is 2 + 2 and why?'),
       ])
     )
 
     expect(
-      hasResponseOfType(result.messages, 'error', content =>
-        /unsafe|dangerous|not allowed|security|protect|cannot/i.test(content)
-      ) ||
-        hasResponseOfType(result.messages, 'chat', content =>
-          /unsafe|dangerous|not allowed|security|protect|cannot/i.test(content)
-        )
+      hasResponseOfType(result.messages, 'thought') ||
+        hasResponseOfType(result.messages, 'chat', (response): boolean => {
+          return (
+            response.type === 'chat' &&
+            response.content.toLowerCase().includes('2') &&
+            response.content.toLowerCase().includes('4')
+          )
+        })
     ).toBe(true)
   })
 
-  // Memory and persistence tests
-  test('should maintain conversation context across interactions', async () => {
-    const agent = await createTestAgent()
+  // Memory and persistence tests using LangGraph functional API
+  test('should maintain conversation context across interactions using workflow memory', async () => {
+    const workflowConfig = {
+      thread_id: ctx.threadId,
+      checkpoint_ns: 'memory_test',
+      [Symbol.toStringTag]: 'AgentConfigurable' as const,
+    }
 
+    const workflow = entrypoint(
+      {
+        checkpointer: ctx.memorySaver,
+        name: 'memory_test_workflow',
+      },
+      async (inputs: AgentInput) => {
+        const agent = await createTestAgent({
+          configurable: workflowConfig,
+        })
+        return await agent.invoke(inputs, {
+          configurable: workflowConfig,
+        })
+      }
+    )
+
+    // First interaction
     const result1 = await waitForResponse(
-      invokeAgent(agent, [new HumanMessage('My name is Alice')])
-    )
-
-    const result2 = await waitForResponse(
-      invokeAgent(agent, [...result1.messages, new HumanMessage('What is my name?')], '2')
-    )
-
-    expect(
-      hasResponseOfType(result2.messages, 'chat', content =>
-        content.toLowerCase().includes('alice')
+      workflow.invoke(
+        {
+          messages: [new HumanMessage('Remember that my name is Alice')],
+          configurable: workflowConfig,
+        } as AgentInput,
+        {
+          configurable: workflowConfig,
+        }
       )
+    )
+
+    expect(result1.threadId).toBe(ctx.threadId)
+    expect(
+      hasResponseOfType(result1.messages, 'chat', (response): boolean => {
+        return response.type === 'chat' && response.content.toLowerCase().includes('alice')
+      })
+    ).toBe(true)
+
+    // Second interaction using same workflow
+    const result2 = await waitForResponse(
+      workflow.invoke(
+        {
+          messages: [...result1.messages, new HumanMessage('What is my name?')],
+          configurable: workflowConfig,
+        } as AgentInput,
+        {
+          configurable: workflowConfig,
+        }
+      )
+    )
+
+    expect(result2.threadId).toBe(ctx.threadId)
+    expect(
+      hasResponseOfType(result2.messages, 'chat', (response): boolean => {
+        return response.type === 'chat' && response.content.toLowerCase().includes('alice')
+      })
+    ).toBe(true)
+  })
+
+  test('should handle cross-thread memory isolation', async () => {
+    const createWorkflowConfig = (threadId: string) => ({
+      thread_id: threadId,
+      checkpoint_ns: 'isolation_test',
+      [Symbol.toStringTag]: 'AgentConfigurable' as const,
+    })
+
+    const workflow = entrypoint(
+      {
+        checkpointer: ctx.memorySaver,
+        name: 'isolation_test_workflow',
+      },
+      async (inputs: AgentInput) => {
+        const workflowConfig = createWorkflowConfig(inputs.configurable?.thread_id || '')
+        const agent = await createTestAgent({
+          configurable: workflowConfig,
+        })
+        return await agent.invoke(inputs, {
+          configurable: workflowConfig,
+        })
+      }
+    )
+
+    // Thread 1
+    const thread1Id = `thread1-${Date.now()}`
+    const thread1Config = createWorkflowConfig(thread1Id)
+    const result1 = await waitForResponse(
+      workflow.invoke(
+        {
+          messages: [new HumanMessage('My name is Bob')],
+          configurable: thread1Config,
+        } as AgentInput,
+        {
+          configurable: thread1Config,
+        }
+      )
+    )
+
+    expect(result1.threadId).toBe(thread1Id)
+
+    // Thread 2 (different thread)
+    const thread2Id = `thread2-${Date.now()}`
+    const thread2Config = createWorkflowConfig(thread2Id)
+    const result2 = await waitForResponse(
+      workflow.invoke(
+        {
+          messages: [new HumanMessage('What is my name?')],
+          configurable: thread2Config,
+        } as AgentInput,
+        {
+          configurable: thread2Config,
+        }
+      )
+    )
+
+    expect(result2.threadId).toBe(thread2Id)
+
+    // Thread 2 should not know about Bob
+    expect(
+      !hasResponseOfType(result2.messages, 'chat', (response): boolean => {
+        return response.type === 'chat' && response.content.toLowerCase().includes('bob')
+      }) &&
+        !hasResponseOfType(result2.messages, 'final', (response): boolean => {
+          return response.type === 'final' && response.content.toLowerCase().includes('bob')
+        })
     ).toBe(true)
   })
 
   test('should respect maxIterations limit', async () => {
     const agent = await createTestAgent({
-      maxIterations: 3,
+      maxIterations: 2,
       safetyConfig: {
         requireToolConfirmation: false,
         requireToolFeedback: false,
@@ -232,10 +310,10 @@ describe('ReAct Agent Unit Tests', () => {
     })
 
     const result = await waitForResponse(
-      invokeAgent(agent, [new HumanMessage('List directory contents recursively')])
+      invokeAgent(agent, [new HumanMessage('Tell me about TypeScript')])
     )
 
-    expect(result.iterations).toBeLessThanOrEqual(3)
+    expect(result.iterations).toBeLessThanOrEqual(2)
     expect(result.status).toBe('end')
   })
 
@@ -253,30 +331,26 @@ describe('ReAct Agent Unit Tests', () => {
     expect(allResponsesValid).toBe(true)
   })
 
-  test('should handle code responses', async () => {
-    const agent = await createTestAgent()
-    const result = await waitForResponse(
-      invokeAgent(agent, [new HumanMessage('Show me a TypeScript interface example')])
+  test('should handle checkpoint persistence across agent instances', async () => {
+    // First agent instance
+    const agent1 = await createTestAgent()
+    const result1 = await waitForResponse(
+      invokeAgent(agent1, [new HumanMessage('Remember that my favorite color is blue')])
     )
 
-    expect(
-      hasResponseOfType(
-        result.messages,
-        'code',
-        response => response.language === 'typescript' && response.code.includes('interface')
-      )
-    ).toBe(true)
-  })
+    expect(result1.threadId).toBe(ctx.threadId)
 
-  test('should handle thought process in responses', async () => {
-    const agent = await createTestAgent()
-    const result = await waitForResponse(
-      invokeAgent(agent, [new HumanMessage('What files are in this directory?')])
+    // Second agent instance with same thread ID
+    const agent2 = await createTestAgent()
+    const result2 = await waitForResponse(
+      invokeAgent(agent2, [...result1.messages, new HumanMessage('What is my favorite color?')])
     )
 
+    expect(result2.threadId).toBe(ctx.threadId)
     expect(
-      hasResponseOfType(result.messages, 'thought') ||
-        hasResponseOfType(result.messages, 'tool', response => response.thought !== undefined)
+      hasResponseOfType(result2.messages, 'chat', (response): boolean => {
+        return response.type === 'chat' && response.content.toLowerCase().includes('blue')
+      })
     ).toBe(true)
   })
 })

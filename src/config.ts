@@ -5,16 +5,5 @@ export const DEFAULT_AGENT_CONFIG = {
   userInputTimeout: 30000,
   safetyConfig: {
     maxInputLength: 4096,
-    dangerousToolPatterns: [
-      'rm -rf',
-      'sudo',
-      'chmod',
-      'chown',
-      'mkfs',
-      'dd',
-      '> /dev/',
-      '> /proc/',
-      '> /sys/',
-    ],
   },
 }

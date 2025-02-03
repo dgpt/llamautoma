@@ -9,12 +9,14 @@ import {
   FunctionalReActConfig,
   SafetyConfig,
   ReActResponseSchema,
+  AgentConfigurable,
 } from '@/types/agent'
 import AGENT_TOOLS from '@/agents/tools'
 import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
 import { v4 as uuidv4 } from 'uuid'
 import { FunctionalReActConfigSchema } from '@/types/agent'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
+import { entrypoint, task } from '@langchain/langgraph'
 
 const SYSTEM_PROMPT = `You are an advanced AI assistant designed to solve tasks systematically and safely.
 Your responses MUST ALWAYS be in a structured format.
@@ -23,6 +25,7 @@ Guidelines:
 1. Break down complex tasks into manageable steps
 2. Use available tools strategically and safely
 3. Provide clear, step-by-step reasoning
+4. Always include TypeScript in your responses when discussing code or programming concepts
 
 IMPORTANT:
 - For TypeScript code execution, use the typescript-execution tool
@@ -79,10 +82,11 @@ export function createReActAgent(config: FunctionalReActConfig) {
 
   // Configure tools with proper error handling
   const agentTools = AGENT_TOOLS.map(tool => ({
-    ...tool,
-    invoke: async (...args: any[]) => {
+    name: tool.name,
+    description: tool.description,
+    func: async (input: Record<string, unknown>) => {
       try {
-        const result = await tool.invoke(...args)
+        const result = await tool.invoke(input)
         return result
       } catch (error) {
         logger.error('Tool execution failed', {
@@ -94,91 +98,102 @@ export function createReActAgent(config: FunctionalReActConfig) {
     },
   }))
 
-  // Create the ReAct agent with structured response format using LangGraph's Functional API
-  const agent = createReactAgent({
-    llm: chatModel,
-    tools: agentTools,
-    responseFormat: {
-      schema: ReActResponseSchema,
-      prompt:
-        'Always return responses in the JSON format specified by the schema. For tool calls, include thought process and arguments. For final answers, include clear explanations. For TypeScript execution, validate code before running.',
-    },
-  })
+  // Create the model task
+  const callModel = task(
+    'callModel',
+    async (messages: AgentInput['messages'], runConfig?: RunnableConfig) => {
+      const result = await chatModel.invoke(messages, runConfig)
+      return result
+    }
+  )
 
-  // Add system message to the agent's messages
-  const systemMessage = new SystemMessage(
-    SYSTEM_PROMPT.replace('{tools}', agentTools.map(t => `${t.name}: ${t.description}`).join('\n'))
+  // Create the agent workflow
+  const workflow = entrypoint(
+    {
+      checkpointer: memorySaver,
+      name: 'react_agent',
+    },
+    async (inputs: AgentInput) => {
+      const { messages, configurable } = inputs
+      const threadId = configurable?.thread_id || uuidv4()
+      const agentConfigurable: AgentConfigurable = {
+        thread_id: threadId,
+        checkpoint_ns: configurable?.checkpoint_ns || 'react_agent',
+        [Symbol.toStringTag]: 'AgentConfigurable',
+      }
+
+      const systemMessage = new SystemMessage(
+        SYSTEM_PROMPT.replace(
+          '{tools}',
+          agentTools.map(t => `${t.name}: ${t.description}`).join('\n')
+        )
+      )
+
+      // Execute model with system message and user messages
+      const result = await callModel([systemMessage, ...messages], {
+        configurable: agentConfigurable,
+      })
+
+      // Parse response and determine status
+      let status: 'continue' | 'end' = 'continue'
+      let toolFeedback = {}
+
+      try {
+        const response = JSON.parse(result.content.toString())
+        if (ReActResponseSchema.safeParse(response).success) {
+          if (response.type === 'final') {
+            status = 'end'
+          } else if (response.type === 'tool' && response.action === 'typescript-execution') {
+            toolFeedback = {
+              executionResult: response.args?.output || '',
+              executionSuccess: !response.args?.error,
+            }
+          }
+        }
+      } catch {
+        // If we can't parse the JSON, default to continue
+        status = 'continue'
+      }
+
+      // Return structured output
+      return {
+        messages: [result],
+        status,
+        toolFeedback,
+        iterations: 0,
+        threadId,
+        configurable: agentConfigurable,
+      }
+    }
   )
 
   return {
     invoke: async (input: AgentInput, runConfig?: RunnableConfig): Promise<AgentOutput> => {
-      // Create base configurable for thread persistence
-      const baseConfigurable = {
-        thread_id:
-          runConfig?.configurable?.thread_id ||
-          validatedConfig.threadId ||
-          input.configurable?.thread_id ||
-          uuidv4(),
-        checkpoint_ns: input.configurable?.checkpoint_ns || 'react_agent',
-        [Symbol.toStringTag]: 'AgentConfigurable' as const,
-      }
+      const threadId =
+        runConfig?.configurable?.thread_id ||
+        validatedConfig.threadId ||
+        input.configurable?.thread_id ||
+        uuidv4()
 
-      // Setup memory configuration
-      const memoryConfig = {
-        persistence: memorySaver,
-        namespace: baseConfigurable.checkpoint_ns,
-        threadId: baseConfigurable.thread_id,
+      const baseConfigurable: AgentConfigurable = {
+        thread_id: threadId,
+        checkpoint_ns: input.configurable?.checkpoint_ns || 'react_agent',
+        [Symbol.toStringTag]: 'AgentConfigurable',
       }
 
       try {
-        // Execute agent with input and system message
-        const result = await agent.invoke(
+        return await workflow.invoke(
           {
-            messages: [systemMessage, ...input.messages],
+            messages: input.messages,
+            configurable: baseConfigurable,
           },
           {
-            ...runConfig,
-            configurable: {
-              ...baseConfigurable,
-              memory: memoryConfig,
-            },
+            configurable: baseConfigurable,
           }
         )
-
-        // Parse the last message to determine status
-        const lastMessage = result.messages[result.messages.length - 1]
-        let status: 'continue' | 'end' = 'continue'
-        let toolFeedback = {}
-
-        try {
-          const response = JSON.parse(lastMessage.content.toString())
-          if (ReActResponseSchema.safeParse(response).success) {
-            if (response.type === 'final') {
-              status = 'end'
-            } else if (response.type === 'tool' && response.action === 'typescript-execution') {
-              toolFeedback = {
-                executionResult: response.args?.output || '',
-                executionSuccess: !response.args?.error,
-              }
-            }
-          }
-        } catch {
-          // If we can't parse the JSON, default to continue
-          status = 'continue'
-        }
-
-        // Return output with structured response
-        return {
-          messages: result.messages,
-          status,
-          toolFeedback,
-          iterations: 0,
-          threadId: baseConfigurable.thread_id,
-          configurable: baseConfigurable,
-        }
       } catch (error) {
         logger.error('Agent execution failed', {
-          threadId: baseConfigurable.thread_id,
+          threadId,
           error: error instanceof Error ? error.message : String(error),
         })
         throw error

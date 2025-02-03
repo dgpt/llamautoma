@@ -1,6 +1,8 @@
 import { Tool } from '@langchain/core/tools'
+import { z } from 'zod'
 import { logger } from '@/logger'
 import { createContext, runInContext } from 'vm'
+import { StructuredTool } from '@langchain/core/tools'
 
 interface TypeScriptExecutionConfig {
   maxIterations?: number
@@ -26,9 +28,13 @@ interface ErrorDetails {
   error?: unknown
 }
 
-export class TypeScriptExecutionTool extends Tool {
+export class TypeScriptExecutionTool extends StructuredTool {
   name = 'typescript-execution'
   description = 'Execute TypeScript code in a secure environment and return the result'
+  schema = z.object({
+    code: z.string().describe('The TypeScript code to execute'),
+  })
+
   private config: TypeScriptExecutionConfig
   private currentContext: ExecutionContext | null = null
 
@@ -40,10 +46,10 @@ export class TypeScriptExecutionTool extends Tool {
     }
   }
 
-  async _call(input: string): Promise<string> {
+  async _call(input: { code: string }): Promise<string> {
     try {
       logger.debug('Executing TypeScript code', { input })
-      const result = await this.executeCode(input)
+      const result = await this.executeCode(input.code)
       logger.debug('Execution complete', { result })
       return result
     } catch (error) {
