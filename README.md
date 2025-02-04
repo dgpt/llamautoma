@@ -1,217 +1,218 @@
-# Llamautoma
+# 🦙 🤖 Llamautoma
 
-AI-powered automation server using LangChain.js, LangGraph.js, and Ollama. This server is part of the coc-llamautoma project, providing AI-assisted code generation and editing features through a streaming API.
+A powerful, TypeScript-based AI agent framework built on top of LangChain for automated code generation, editing, and management. Designed to work seamlessly with modern language models and development workflows.
 
-## Features
+[![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Bun](https://img.shields.io/badge/Bun-000000?style=flat-square&logo=bun&logoColor=white)](https://bun.sh/)
+[![LangChain](https://img.shields.io/badge/🦜_LangChain-000000?style=flat-square)](https://js.langchain.com/)
 
-- **Chat**: Stream-based chat interface with AI model for code-related discussions
-- **Edit**: AI-assisted code editing with file modifications and safety checks
-- **Compose**: AI-powered file generation with context awareness
-- **Embed**: File and text embedding for context-aware operations
-- **Tools**: Extensible tool system with safety checks and user confirmation
-- **LSP Integration**: Language Server Protocol support for IDE integration
-- **Streaming**: Real-time streaming responses for all operations
-- **Safety**: Built-in safety checks and user confirmation for dangerous operations
-- **Memory**: Short-term and long-term memory using LangGraph.js
+## ✨ Features
 
-## Prerequisites
+- 🚀 High-performance TypeScript execution engine
+- 🔄 Real-time code generation and editing
+- 🧠 Advanced AI agent system with ReAct framework
+- 🔒 Built-in safety controls and validation
+- 📝 Streaming responses for real-time feedback
+- 🛠️ Extensible tool system
 
-- [Bun](https://bun.sh/) >= 1.0.0
-- [Ollama](https://ollama.ai/) with required models:
-  - Default: `qwen2.5-coder:7b` (production)
-  - Testing: `qwen2.5-coder:1.5b` (faster for tests)
+## 🚀 Quick Start
 
-## Installation
+### Prerequisites
+
+- [Bun](https://bun.sh/) runtime installed
+- A compatible language model (e.g., Ollama with qwen2.5-coder)
+
+### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/dgpt/llamautoma.git
+git clone https://github.com/yourusername/llamautoma.git
 cd llamautoma
 
 # Install dependencies
 bun install
 
 # Start the server
-bun run dev
+bun run start
 ```
 
-## Configuration
+## 🔌 API Reference
 
-### Environment Variables
+The server exposes several HTTP endpoints for different code-related operations. All endpoints accept POST requests and expect JSON payloads.
 
-Create a `.env` file in the root directory:
-
-```env
-# Server Configuration
-PORT=3000                              # Server port (default: 3000)
-OLLAMA_HOST=http://localhost:11434     # Ollama server URL
-LOG_LEVEL=info                         # Logging level (debug|info|warn|error)
-
-# Agent Configuration
-MODEL_NAME=qwen2.5-coder:7b            # Default model name
-MAX_ITERATIONS=10                      # Maximum iterations per request
-USER_INPUT_TIMEOUT=30000              # Timeout for user input (ms)
+### Base URL
+```
+http://localhost:3000/v1
 ```
 
-### Safety Configuration
+### Common Request Properties
 
-The server includes built-in safety checks that can be configured:
+All requests support these common properties:
+- `threadId` (optional): Unique identifier for the conversation thread
+- `safetyConfig` (optional): Configuration for safety controls
+  - `maxInputLength`: Maximum allowed input length (default: 8192)
+  - `requireToolConfirmation`: Whether to require confirmation for tool usage
+  - `requireToolFeedback`: Whether to require feedback for tool usage
+  - `dangerousToolPatterns`: Array of patterns to flag as potentially dangerous
+
+### Common Response Format
+
+All endpoints return Server-Sent Events (SSE) streams with the following event types:
+- `start`: Initial response start with metadata
+- `content`: Main response content (may be sent multiple times)
+- `end`: Response completion with final results
+
+The specific content of each event varies by endpoint but follows this general structure:
+```typescript
+{
+  "event": "start" | "content" | "end",
+  "threadId": string,
+  "data": {
+    // Endpoint-specific data structure
+  }
+}
+```
+
+### 1. Chat Endpoint
+`POST /v1/chat`
+
+Interactive chat endpoint with streaming responses.
 
 ```typescript
 {
-  requireToolConfirmation: true,      // Require user confirmation for tool execution
-  requireToolFeedback: true,          // Require user feedback after tool execution
-  maxInputLength: 8192,               // Maximum input length
-  dangerousToolPatterns: [            // Patterns requiring extra confirmation
-    'rm -rf /',
-    'DROP TABLE',
-    'sudo rm',
-    'wget http',
-    'curl',
-    'exec',
-    'bash -c',
-    'zsh -c',
-    'sh -c'
+  "messages": [
+    {
+      "role": "user",
+      "content": "How do I implement a binary search tree in TypeScript?"
+    }
+  ],
+  "threadId": "optional-thread-id",
+  "safetyConfig": {
+    "maxInputLength": 8192
+  }
+}
+```
+
+Response: Server-Sent Events (SSE) stream with the following events:
+- `start`: Initial response start
+- `content`: Main response content
+- `end`: Response completion
+
+### 2. Edit Endpoint
+`POST /v1/edit`
+
+Code editing and modification endpoint with real-time updates.
+
+```typescript
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Add error handling to this function"
+    }
+  ],
+  "threadId": "optional-thread-id"
+}
+```
+
+Response:
+```typescript
+{
+  "edits": [
+    {
+      "file": "path/to/file.ts",
+      "content": "// Modified code content"
+    }
   ]
 }
 ```
 
-## API Endpoints
+### 3. Compose Endpoint
+`POST /v1/compose`
 
-### Chat (`POST /chat`)
-
-Stream-based chat interface with the AI model.
-
-```typescript
-// Request
-{
-  messages: Array<{
-    role: 'user' | 'system' | 'assistant'
-    content: string
-  }>
-  threadId: string
-}
-
-// Response (Server-Sent Events)
-data: {
-  messages: Array<BaseMessage>
-  status: 'continue' | 'end'
-  toolFeedback: Record<string, string>
-  iterations: number
-  threadId: string
-}
-```
-
-### Edit (`POST /edit`)
-
-AI-assisted code editing with file modifications.
+Generate new code files and components with progress updates.
 
 ```typescript
-// Request
 {
-  file: string
-  prompt: string
-  threadId: string
-}
-
-// Response (Server-Sent Events)
-data: {
-  type: 'edit'
-  messages: Array<BaseMessage>
-  status: 'continue' | 'end'
-  toolFeedback: Record<string, string>
-  iterations: number
-  threadId: string
+  "messages": [
+    {
+      "role": "user",
+      "content": "Create a React component for a user profile"
+    }
+  ],
+  "threadId": "optional-thread-id"
 }
 ```
 
-### Compose (`POST /compose`)
+Response:
+```typescript
+{
+  "files": [
+    {
+      "path": "components/UserProfile.tsx",
+      "content": "// Generated component code"
+    }
+  ]
+}
+```
 
-AI-powered file generation.
+### 4. Sync Endpoint
+`POST /v1/sync`
+
+Synchronize and analyze codebase structure with progress updates.
 
 ```typescript
-// Request
 {
-  prompt: string
-  threadId: string
-}
-
-// Response (Server-Sent Events)
-data: {
-  type: 'compose'
-  messages: Array<BaseMessage>
-  status: 'continue' | 'end'
-  toolFeedback: Record<string, string>
-  iterations: number
-  threadId: string
+  "root": "/path/to/project",
+  "excludePatterns": ["node_modules", "dist"]
 }
 ```
 
-### Embed (`POST /embed`)
+Response:
+```typescript
+{
+  "status": "success"
+}
+```
 
-File and text embedding for context-aware operations.
+## 🔒 Safety Features
+
+Llamautoma includes several safety features to prevent potentially harmful operations:
+
+- Input length validation
+- Dangerous pattern detection
+- Tool execution confirmation
+- Execution feedback collection
+- Rate limiting
+
+## 🛠️ Configuration
+
+The server can be configured through environment variables or the config file:
 
 ```typescript
-// Request
 {
-  type: 'file' | 'text'
-  path?: string
-  content: string
+  "modelName": "qwen2.5-coder:7b",
+  "host": "http://localhost:11434",
+  "maxIterations": 10,
+  "userInputTimeout": 30000,
+  "safetyConfig": {
+    "requireToolConfirmation": true,
+    "requireToolFeedback": true,
+    "maxInputLength": 8192,
+    "dangerousToolPatterns": [
+      "rm -rf /",
+      "DROP TABLE",
+      "sudo rm",
+      // ... more patterns
+    ]
+  }
 }
-
-// Response
-{
-  success: boolean
-  embeddings: number[]
-}
 ```
 
-## Development
+## 📝 License
 
-```bash
-# Start development server with hot reload
-bun run dev
+MIT License - see the [LICENSE](LICENSE) file for details.
 
-# Run tests
-bun test
+## 🤝 Contributing
 
-# Run tests in watch mode
-bun test --watch
-
-# Run tests with coverage
-bun test --coverage
-
-# Lint code
-bun run lint
-
-# Format code
-bun run format
-```
-
-## Project Structure
-
-```
-llamautoma/
-├── src/
-│   ├── agents/         # AI agents and tools
-│   ├── config/         # Configuration management
-│   ├── server/         # Server implementation
-│   ├── types/          # TypeScript type definitions
-│   └── utils/          # Utility functions
-├── tests/
-│   ├── unit/          # Unit tests
-│   └── integration/   # Integration tests
-└── package.json
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-MIT
+Contributions are welcome! Please feel free to submit a Pull Request.

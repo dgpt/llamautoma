@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'bun:test'
-import { TypeScriptExecutionTool } from '@/agents/tools/typescriptExecutionTool'
+import { TypeScriptExecutionTool } from '@/ai/tools/eval'
 
 describe('TypeScriptExecutionTool', () => {
   test('should execute basic arithmetic', async () => {

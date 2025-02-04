@@ -38,30 +38,31 @@ export const endTimer = (id: string): number | undefined => {
 }
 
 // Focused logging functions
-export const logUserInput = (threadId: string, content: string) => {
-  logger.info({ threadId }, `📤 User Input: ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`)
+export const logUserInput = (content: string) => {
+  logger.info(`📤 User Input: ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`)
 }
 
-export const logAgentResponse = (threadId: string, type: string, content: string, elapsedMs?: number) => {
+export const logAgentResponse = (type: string, content: string, elapsedMs?: number) => {
   const timing = elapsedMs ? ` (${elapsedMs}ms)` : ''
   logger.info(
-    { threadId },
     `📥 Agent Response [${type}]${timing}: ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`
   )
 }
 
-export const logRequest = (threadId: string, method: string, url: string, body?: any) => {
-  logger.info({ threadId }, `🌐 Request ${method} ${url}${body ? ` Body: ${JSON.stringify(body).slice(0, 100)}...` : ''}`)
+export const logRequest = (method: string, url: string, body?: any) => {
+  logger.info(
+    `🌐 Request ${method} ${url}${body ? ` Body: ${JSON.stringify(body).slice(0, 100)}...` : ''}`
+  )
 }
 
-export const logResponse = (threadId: string, url: string, status: number, elapsedMs: number) => {
-  logger.info({ threadId }, `🌐 Response ${url} [${status}] (${elapsedMs}ms)`)
+export const logResponse = (url: string, status: number, elapsedMs: number) => {
+  logger.info(`🌐 Response ${url} [${status}] (${elapsedMs}ms)`)
 }
 
-export const logStreamData = (threadId: string, data: any) => {
-  logger.info({ threadId }, `📡 Stream Data: ${JSON.stringify(data).slice(0, 100)}...`)
+export const logStreamData = (data: any) => {
+  logger.info(`📡 Stream Data: ${JSON.stringify(data).slice(0, 100)}...`)
 }
 
-export const logError = (threadId: string, error: Error | string, context?: any) => {
-  logger.error({ threadId, ...(context || {}) }, `❌ Error: ${error instanceof Error ? error.message : error}`)
+export const logError = (error: Error | string, context?: any) => {
+  logger.error(`❌ Error: ${error instanceof Error ? error.message : error}`, context)
 }

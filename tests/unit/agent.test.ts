@@ -1,9 +1,9 @@
 import { expect, test, describe, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { ChatOllama } from '@langchain/ollama'
-import { SystemMessage, HumanMessage, BaseMessage } from '@langchain/core/messages'
+import { HumanMessage, BaseMessage } from '@langchain/core/messages'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { createReActAgent } from '@/agents'
-import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
+import { DEFAULT_AGENT_CONFIG, RunnableConfig } from '@/types'
 import { ReActResponse, ReActResponseSchema, AgentInput } from '@/types/agent'
 import { entrypoint } from '@langchain/langgraph'
 
@@ -38,8 +38,8 @@ describe('ReAct Agent Unit Tests', () => {
     process.env.NODE_ENV = 'development'
   })
 
-  const createTestAgent = async (config: Record<string, any> = {}) => {
-    const defaultConfig = {
+  const createTestAgent = async (config: Partial<RunnableConfig> = {}) => {
+    const defaultConfig: RunnableConfig = {
       modelName: DEFAULT_AGENT_CONFIG.modelName,
       host: DEFAULT_AGENT_CONFIG.host,
       configurable: {
@@ -47,18 +47,12 @@ describe('ReAct Agent Unit Tests', () => {
         checkpoint_ns: 'react_agent',
         [Symbol.toStringTag]: 'AgentConfigurable',
       },
-      memoryPersistence: ctx.memorySaver,
-      chatModel: ctx.chatModel,
-      maxIterations: 3,
+      memoryPersist: true,
     }
 
-    return createReActAgent({
+    return await createReActAgent({
       ...defaultConfig,
       ...config,
-      configurable: {
-        ...defaultConfig.configurable,
-        ...(config.configurable || {}),
-      },
     })
   }
 
@@ -98,60 +92,6 @@ describe('ReAct Agent Unit Tests', () => {
       return null
     }
   }
-
-  const findResponseByType = (messages: BaseMessage[], type: string): ReActResponse | null => {
-    for (const message of messages) {
-      const response = validateResponse(message)
-      if (response && response.type === type) {
-        return response
-      }
-    }
-    return null
-  }
-
-  const hasResponseOfType = (
-    messages: BaseMessage[],
-    type: string,
-    contentPredicate?: (response: ReActResponse) => boolean
-  ): boolean => {
-    for (const message of messages) {
-      const response = validateResponse(message)
-      if (response && response.type === type) {
-        if (!contentPredicate) return true
-        return contentPredicate(response)
-      }
-    }
-    return false
-  }
-
-  const hasResponseWithContent = (
-    messages: BaseMessage[],
-    type: string,
-    contentCheck: (content: string) => boolean
-  ): boolean => {
-    for (const message of messages) {
-      const response = validateResponse(message)
-      if (!response) continue
-
-      switch (response.type) {
-        case 'thought':
-        case 'chat':
-        case 'final':
-        case 'error':
-        case 'observation':
-        case 'confirmation':
-        case 'feedback':
-          if (response.type === type && contentCheck(response.content)) {
-            return true
-          }
-          break
-        default:
-          break
-      }
-    }
-    return false
-  }
-
   test('should create agent with default configuration', async () => {
     const agent = await createTestAgent()
     expect(agent).toBeDefined()
@@ -167,8 +107,7 @@ describe('ReAct Agent Unit Tests', () => {
     expect(result.status).toBe('end')
     expect(result.iterations).toBeDefined()
     expect(result.threadId).toBe(ctx.threadId)
-    expect(result.configurable).toBeDefined()
-    expect(result.configurable.thread_id).toBe(ctx.threadId)
+    expect(result.checkpoint).toBeDefined()
 
     const hasValidResponse = result.messages.some((msg: BaseMessage) => {
       const response = validateResponse(msg)
@@ -197,17 +136,23 @@ describe('ReAct Agent Unit Tests', () => {
   })
 
   test('should maintain conversation context across interactions using workflow memory', async () => {
-    const workflowConfig = {
-      thread_id: ctx.threadId,
-      checkpoint_ns: 'memory_test',
-      [Symbol.toStringTag]: 'AgentConfigurable' as const,
+    const workflowConfig: RunnableConfig = {
+      modelName: DEFAULT_AGENT_CONFIG.modelName,
+      host: DEFAULT_AGENT_CONFIG.host,
+      threadId: ctx.threadId,
+      checkpoint: 'memory_test',
+      configurable: {
+        thread_id: ctx.threadId,
+        checkpoint_ns: 'memory_test',
+        [Symbol.toStringTag]: 'AgentConfigurable',
+      },
     }
 
     const workflow = entrypoint(
       { checkpointer: ctx.memorySaver, name: 'memory_test_workflow' },
       async (inputs: AgentInput) => {
-        const agent = await createTestAgent({ configurable: workflowConfig })
-        return await agent.invoke(inputs, { configurable: workflowConfig })
+        const agent = await createTestAgent(workflowConfig)
+        return await agent.invoke(inputs, workflowConfig)
       }
     )
 
@@ -216,9 +161,9 @@ describe('ReAct Agent Unit Tests', () => {
       workflow.invoke(
         {
           messages: [new HumanMessage('Remember that my name is Alice')],
-          configurable: workflowConfig,
+          ...workflowConfig,
         },
-        { configurable: workflowConfig }
+        workflowConfig
       )
     )
 
@@ -236,9 +181,9 @@ describe('ReAct Agent Unit Tests', () => {
       workflow.invoke(
         {
           messages: [...result1.messages, new HumanMessage('What is my name?')],
-          configurable: workflowConfig,
+          ...workflowConfig,
         },
-        { configurable: workflowConfig }
+        workflowConfig
       )
     )
 
@@ -253,18 +198,24 @@ describe('ReAct Agent Unit Tests', () => {
   })
 
   test('should handle cross-thread memory isolation', async () => {
-    const createWorkflowConfig = (threadId: string) => ({
-      thread_id: threadId,
-      checkpoint_ns: 'isolation_test',
-      [Symbol.toStringTag]: 'AgentConfigurable' as const,
+    const createWorkflowConfig = (threadId: string): RunnableConfig => ({
+      modelName: DEFAULT_AGENT_CONFIG.modelName,
+      host: DEFAULT_AGENT_CONFIG.host,
+      threadId,
+      checkpoint: 'isolation_test',
+      configurable: {
+        thread_id: threadId,
+        checkpoint_ns: 'isolation_test',
+        [Symbol.toStringTag]: 'AgentConfigurable',
+      },
     })
 
     const workflow = entrypoint(
       { checkpointer: ctx.memorySaver, name: 'isolation_test_workflow' },
       async (inputs: AgentInput) => {
-        const workflowConfig = createWorkflowConfig(inputs.configurable?.thread_id || '')
-        const agent = await createTestAgent({ configurable: workflowConfig })
-        return await agent.invoke(inputs, { configurable: workflowConfig })
+        const workflowConfig = createWorkflowConfig(inputs.threadId || '')
+        const agent = await createTestAgent(workflowConfig)
+        return await agent.invoke(inputs, workflowConfig)
       }
     )
 
@@ -275,9 +226,9 @@ describe('ReAct Agent Unit Tests', () => {
       workflow.invoke(
         {
           messages: [new HumanMessage('My name is Bob')],
-          configurable: thread1Config,
+          ...thread1Config,
         },
-        { configurable: thread1Config }
+        thread1Config
       )
     )
 
@@ -290,9 +241,9 @@ describe('ReAct Agent Unit Tests', () => {
       workflow.invoke(
         {
           messages: [new HumanMessage('What is my name?')],
-          configurable: thread2Config,
+          ...thread2Config,
         },
-        { configurable: thread2Config }
+        thread2Config
       )
     )
 

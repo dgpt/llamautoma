@@ -1,62 +1,18 @@
 import { BaseMessage } from '@langchain/core/messages'
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
-import { RunnableConfig } from '@langchain/core/runnables'
 import { z } from 'zod'
+import { SafetyConfig, RunnableConfig, BaseRequestSchema } from '@/types'
 
 // Shared schemas
-export const ConfigurableSchema = z.object({
-  thread_id: z.string(),
-  checkpoint_ns: z.string(),
-  [Symbol.toStringTag]: z.literal('AgentConfigurable'),
-}).passthrough().optional()
-
-export const SafetyConfigSchema = z.object({
-  requireToolConfirmation: z.boolean().default(true).optional(),
-  requireToolFeedback: z.boolean().default(true).optional(),
-  maxInputLength: z.number().min(1).max(16384).default(8192).optional(),
-  dangerousToolPatterns: z
-    .array(z.string())
-    .default([
-      'drop',
-      'truncate',
-      'exec',
-      'curl',
-      'wget',
-      'bash -c',
-      'rm  -rf /',
-      'zsh -c',
-      'sh -c',
-    ])
-    .optional(),
-}).optional()
-
-export const MessageSchema = z.object({
-  role: z.string(),
-  content: z.string(),
-})
-
-export const MessagesSchema = z.array(MessageSchema).min(1, 'At least one message is required')
-
-// Base schema for all requests
-export const BaseRequestSchema = z.object({
-  threadId: z.string().optional(),
-  modelName: z.string().optional(),
-  host: z.string().optional(),
-  safetyConfig: SafetyConfigSchema,
-  configurable: ConfigurableSchema,
-})
-
-// Chat/Edit/Compose request schema
-export const ChatRequestSchema = BaseRequestSchema.extend({
-  messages: MessagesSchema,
-})
-
-// Sync request schema
-export const SyncRequestSchema = BaseRequestSchema.extend({
-  root: z.string(),
-  excludePatterns: z.array(z.string()).optional(),
-})
+export const ConfigurableSchema = z
+  .object({
+    thread_id: z.string(),
+    checkpoint_ns: z.string(),
+    [Symbol.toStringTag]: z.literal('AgentConfigurable'),
+  })
+  .passthrough()
+  .optional()
 
 // Configuration schema with strong typing
 export const FunctionalReActConfigSchema = BaseRequestSchema.extend({
@@ -67,11 +23,9 @@ export const FunctionalReActConfigSchema = BaseRequestSchema.extend({
   maxIterations: z.number().min(1).max(30).default(10).optional(),
   userInputTimeout: z.number().min(0).max(36000).default(300).optional(),
   chatModel: z.instanceof(BaseChatModel).optional(),
-}).transform(data => ({
-  ...data,
-  modelName: data.modelName || 'qwen2.5-coder:7b',
-  host: data.host || 'http://localhost:11434',
-}))
+})
+
+export type FunctionalReActConfig = z.infer<typeof FunctionalReActConfigSchema>
 
 // Core agent state interface
 export interface AgentState {
@@ -86,7 +40,7 @@ export interface AgentState {
   toolFeedback: Record<string, unknown>
   userConfirmed: boolean
   threadId: string
-  configurable: AgentConfigurable
+  checkpoint: string
   streamComplete?: boolean
 }
 
@@ -99,7 +53,8 @@ export interface AgentConfigurable {
 
 export interface AgentInput {
   messages: BaseMessage[]
-  configurable?: AgentConfigurable
+  threadId?: string
+  checkpoint?: string
 }
 
 export interface AgentOutput {
@@ -108,39 +63,7 @@ export interface AgentOutput {
   toolFeedback: Record<string, unknown>
   iterations: number
   threadId: string
-  configurable: AgentConfigurable
-}
-
-export interface SafetyCheckResult {
-  passed: boolean
-  reason?: string
-  warnings?: string[]
-}
-
-export interface ToolExecutionResult {
-  success: boolean
-  output: string
-  error?: Error
-  safetyResult?: SafetyCheckResult
-}
-
-/**
- * Safety configuration for the agent
- */
-export interface SafetyConfig {
-  /** Whether tool executions require user confirmation */
-  requireToolConfirmation: boolean
-  /** Whether tool executions require user feedback */
-  requireToolFeedback: boolean
-  /** Maximum length of input text */
-  maxInputLength: number
-  /** Patterns that indicate potentially dangerous tool usage */
-  dangerousToolPatterns: string[]
-}
-
-export interface UserInteractionResult {
-  confirmed: boolean
-  feedback?: string
+  checkpoint: string
 }
 
 export interface MemoryManagerConfig {
@@ -154,37 +77,12 @@ export interface ToolExecutorConfig {
   runConfig?: RunnableConfig
 }
 
-export type FunctionalReActConfig = z.infer<typeof FunctionalReActConfigSchema>
-
 export type AgentMode = 'test' | 'production'
 
 export interface AgentConfig {
   openaiApiKey: string
   model?: string
   temperature?: number
-}
-
-export const DEFAULT_AGENT_CONFIG = {
-  modelName: 'qwen2.5-coder:1.5b',
-  host: 'http://localhost:11434',
-  maxIterations: 10,
-  userInputTimeout: 30000,
-  safetyConfig: {
-    requireToolConfirmation: true,
-    requireToolFeedback: true,
-    maxInputLength: 8192,
-    dangerousToolPatterns: [
-      'rm -rf /',
-      'DROP TABLE',
-      'sudo rm',
-      'wget http',
-      'curl',
-      'exec',
-      'bash -c',
-      'zsh -c',
-      'sh -c',
-    ],
-  },
 }
 
 // Response format schema for ReAct agent

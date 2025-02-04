@@ -200,14 +200,11 @@ describe('Server Integration Tests', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            threadId: customThreadId,
             messages: [{ role: 'user', content: 'Hello' }],
             modelName: 'qwen2.5-coder:1.5b',
             host: 'http://localhost:11434',
-            configurable: {
-              checkpoint_ns: 'custom-namespace',
-              [Symbol.toStringTag]: 'AgentConfigurable',
-            },
+            threadId: customThreadId,
+            checkpoint: 'custom-namespace',
             safetyConfig: {
               maxInputLength: 8192,
             },

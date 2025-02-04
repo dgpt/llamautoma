@@ -1,0 +1,192 @@
+# Refactoring src/agents
+We will remove src/agents and replace it with src/ai.
+Project structure will look something like this:
+src/ai
+  index.ts <- entrypoint, custom react agent implementation
+  llm.ts <- ChatOllama model
+  tasks/ <- langgraph task definitions
+    - router.ts <- handles orchestration and routing
+    - coder.ts <- generates code based on user's prompt. Generates all code required to fulfill user's request.
+    - reviewer.ts <- reviews the code to ensure it fulfill's the user's request
+    - planner.ts <- interprets user's request and writes a plan for the code
+    - summarizer.ts <- summarizes messages
+    - tester.ts <- proposes test commands to run based on current project's architecture
+    - diff.ts <- examines existing workspace code and generated code from ai/coder, identifying changes required, then producing a diff of changes required
+  - tools/ <- any atomic tools
+    - eval.ts <- eval's ts safely using Bun.eval()
+    - search.ts <- web search tool
+    - run.ts <- handles running shell commands (via the coc.nvim plugin)
+
+## File Streaming Implementation
+The system implements efficient file streaming between server and client:
+
+### Server (Llamautoma)
+1. File Task Requirements:
+   - Uses LangGraph task for file operations
+   - Streams JSON-formatted requests to client
+   - Collects and validates file chunks using Zod schemas
+   - Handles streaming timeouts and errors
+   - Returns files as a map for easy access
+
+2. Response Schema Types:
+   ```typescript
+   // File chunk
+   {
+     type: 'file_chunk',
+     data: {
+       path: string,
+       chunk: string,
+       done: boolean,
+       error?: string
+     }
+   }
+
+   // Completion signal
+   {
+     type: 'file_complete'
+   }
+
+   // Error signal
+   {
+     type: 'error',
+     error: string
+   }
+   ```
+
+### Client (coc-llamautoma)
+1. File Handling Requirements:
+   - Stream files in 1MB chunks for memory efficiency
+   - Use Node.js streams for filesystem files
+   - Prioritize workspace documents over filesystem
+   - Send completion signal after all files
+   - Handle errors at file and request levels
+
+2. File Access Priority:
+   1. Workspace documents (currently open in editor)
+   2. Filesystem streaming fallback
+
+3. Directory Handling:
+   - Use workspace.findFiles() for efficient directory scanning
+   - Support include/exclude patterns
+   - Stream each file individually
+
+### Communication Protocol
+1. Request Flow:
+   - Server sends file request
+   - Client streams file chunks
+   - Client sends completion signal
+   - Server validates and assembles chunks
+
+2. Error Handling:
+   - Both sides must handle timeouts
+   - Both sides must handle invalid data
+   - Both sides must cleanup resources
+   - Use proper error types and messages
+
+3. Memory Management:
+   - Keep chunk size at 1MB
+   - Stream large files
+   - Clean up streams and event listeners
+   - Avoid storing full file content when possible
+
+## Configuring OLLAMA: src/ai/llm.ts
+```
+import { ChatOllama } from '@langchain/ollama'
+export default new ChatOllama({
+  model: // model from config or default model
+  baseUrl: // baseUrl from config or default url
+})
+```
+
+## Requirements
+- ALL incoming requests and outgoing responses MUST be streamed!
+- refactor src/index.ts as necessary
+
+### Implement an Evaluator-Optimizer loop for writing code
+  - entrypoint -> summarizer -> planner -> reviewer -> coder -> reviewer -> diff -> result
+  - summarizer ONLY runs when message context gets too long (configurable)
+  - planner can request user input if plan is user prompt is too vague
+  - planner can also respond with a final request when there is no task to perform (e.g. casual conversation)
+  - reviewer reviews planner's plan to ensure it fulfill's user's request
+  - if review fails, it is sent back to the planner. this repeats a configurable number of times (default 10)
+  - auto-pass at max iterations
+  - coder writes code to fulfill planner's plan. uses current code, then generates as many files and code entries as possible to fulfill the task
+  - coder generates FULL FILEs, we will generate diffs for code patches if the review succeeds
+  - reviewer reviews code according to the current state of the codebase and both the message history and planner's plan, ensuring it fulfill's user's request
+  - if review fails, it is sent back to the coder. this repeats a configurable number of times (default 25)
+  - if max iterations reached, inform the user we reached the max and treat it as though it the review passed.
+  - reviewer takes the coder's code and runs it through the fast-diff lib to generate a diff for our coc.nvim plugin to utilize.
+
+### tools/run.ts
+- this file must expose the "run" tool to the llm to run shell commands from the client
+- it accepts the command to use from the llm and formats it for use in the client
+
+### tools/search.ts
+- utilizes the @tavily/core library to implement searching the web and extracting data from the web into the LLM's memory stores via LangGraph
+- LLM decides what to search and what to extract based on user's prompts
+
+## Evaluator-optimizer example
+import { z } from "zod";
+import { task, entrypoint } from "@langchain/langgraph";
+
+// Schema for structured output to use in evaluation
+const feedbackSchema = z.object({
+  grade: z.enum(["funny", "not funny"]).describe(
+    "Decide if the joke is funny or not."
+  ),
+  feedback: z.string().describe(
+    "If the joke is not funny, provide feedback on how to improve it."
+  ),
+});
+
+// Augment the LLM with schema for structured output
+const evaluator = llm.withStructuredOutput(feedbackSchema);
+
+// Tasks
+const llmCallGenerator = task("jokeGenerator", async (params: {
+  topic: string;
+  feedback?: z.infer<typeof feedbackSchema>;
+}) => {
+  // LLM generates a joke
+  const msg = params.feedback
+    ? await llm.invoke(
+        `Write a joke about ${params.topic} but take into account the feedback: ${params.feedback.feedback}`
+      )
+    : await llm.invoke(`Write a joke about ${params.topic}`);
+  return msg.content;
+});
+
+const llmCallEvaluator = task("jokeEvaluator", async (joke: string) => {
+  // LLM evaluates the joke
+  return evaluator.invoke(`Grade the joke ${joke}`);
+});
+
+// Build workflow
+const workflow = entrypoint(
+  "optimizerWorkflow",
+  async (topic: string) => {
+    let feedback: z.infer<typeof feedbackSchema> | undefined;
+    let joke: string;
+
+    while (true) {
+      joke = await llmCallGenerator({ topic, feedback });
+      feedback = await llmCallEvaluator(joke);
+
+      if (feedback.grade === "funny") {
+        break;
+      }
+    }
+
+    return joke;
+  }
+);
+
+// Invoke
+const stream = await workflow.stream("Cats", {
+  streamMode: "updates",
+});
+
+for await (const step of stream) {
+  console.log(step);
+  console.log("\n");
+}

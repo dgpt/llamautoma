@@ -25,11 +25,11 @@ interface ExecutionResult {
   logs: string[]
 }
 
-export class TypeScriptExecutionTool extends StructuredTool {
-  name = 'typescript-execution'
-  description = 'Execute TypeScript code in a secure environment and return the result'
+export class EvalTool extends StructuredTool {
+  name = 'eval'
+  description = 'Evaluate TypeScript code in a secure environment and return the result'
   schema = z.object({
-    code: z.string().describe('The TypeScript code to execute'),
+    code: z.string().describe('The TypeScript code to evaluate'),
   })
 
   private config: TypeScriptExecutionConfig
