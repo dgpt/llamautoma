@@ -1,22 +1,19 @@
-import { createReactAgent } from '@langchain/langgraph/prebuilt'
-import { ChatOllama } from '@langchain/ollama'
 import { SystemMessage, AIMessage, BaseMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
-import { logger } from '@/logger'
+import { logger, startTimer, endTimer, logAgentResponse, logError } from '@/logger'
 import {
   AgentInput,
   AgentOutput,
   FunctionalReActConfig,
-  SafetyConfig,
   ReActResponseSchema,
   AgentConfigurable,
 } from '@/types/agent'
 import AGENT_TOOLS from '@/agents/tools'
 import { DEFAULT_AGENT_CONFIG } from '@/types/agent'
-import { v4 as uuidv4 } from 'uuid'
 import { FunctionalReActConfigSchema } from '@/types/agent'
 import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { entrypoint, task } from '@langchain/langgraph'
+import { LoggedChatOllama } from '@/clients/ollama'
 
 const SYSTEM_PROMPT = `You are an advanced AI assistant designed to solve tasks systematically and safely.
 Your responses MUST ALWAYS be in a structured JSON format with a type field.
@@ -28,7 +25,7 @@ Guidelines:
 
 IMPORTANT:
 - For calculations, use the typescript-execution tool
-- For dangerous operations, ALWAYS explain why they are unsafe
+- When using typescript-execution, ALWAYS use explicit 'return' statements to return the result
 - For tool usage, ALWAYS wait for confirmation when required
 - For tool execution, ALWAYS provide feedback when required
 
@@ -65,7 +62,7 @@ Assistant: {
   "type": "tool",
   "thought": "Let me verify the calculation",
   "action": "typescript-execution",
-  "args": { "code": "2 + 2" }
+  "args": { "code": "return 2 + 2" }
 }
 {
   "type": "chat",
@@ -80,20 +77,10 @@ export function createReActAgent(config: FunctionalReActConfig) {
   const memorySaver = validatedConfig.memoryPersistence || new MemorySaver()
   const chatModel =
     validatedConfig.chatModel ||
-    new ChatOllama({
+    new LoggedChatOllama({
       model: validatedConfig.modelName || DEFAULT_AGENT_CONFIG.modelName,
       baseUrl: validatedConfig.host || DEFAULT_AGENT_CONFIG.host,
     })
-
-  // Configure safety settings
-  const safetyConfig: SafetyConfig =
-    process.env.NODE_ENV === 'test'
-      ? {
-          ...DEFAULT_AGENT_CONFIG.safetyConfig,
-          requireToolConfirmation: false,
-          requireToolFeedback: false,
-        }
-      : { ...DEFAULT_AGENT_CONFIG.safetyConfig, ...(validatedConfig.safetyConfig || {}) }
 
   // Configure tools
   const agentTools = AGENT_TOOLS.map(tool => ({
@@ -147,7 +134,9 @@ export function createReActAgent(config: FunctionalReActConfig) {
     { checkpointer: memorySaver, name: 'react_agent' },
     async (inputs: AgentInput) => {
       const { messages, configurable } = inputs
-      const threadId = configurable?.thread_id || uuidv4()
+      const threadId = configurable?.thread_id || Bun.randomUUIDv7()
+      startTimer(threadId)
+
       const agentConfigurable: AgentConfigurable = {
         thread_id: threadId,
         checkpoint_ns: configurable?.checkpoint_ns || 'react_agent',
@@ -181,6 +170,14 @@ export function createReActAgent(config: FunctionalReActConfig) {
             allMessages.push(result)
           }
           status = response.type === 'thought' ? 'continue' : 'end'
+
+          const elapsedMs = endTimer(threadId)
+          logAgentResponse(
+            threadId,
+            response.type,
+            response.content || response.thought || '',
+            elapsedMs
+          )
         } else {
           allMessages.push(
             new AIMessage(
@@ -191,6 +188,9 @@ export function createReActAgent(config: FunctionalReActConfig) {
             )
           )
           status = 'end'
+
+          const elapsedMs = endTimer(threadId)
+          logAgentResponse(threadId, 'chat', result.content.toString(), elapsedMs)
         }
 
         return {
@@ -202,7 +202,7 @@ export function createReActAgent(config: FunctionalReActConfig) {
           configurable: agentConfigurable,
         }
       } catch (error) {
-        logger.error('Workflow execution failed', { threadId, error })
+        logError(threadId, error instanceof Error ? error.message : String(error))
         throw error
       }
     }
@@ -214,7 +214,7 @@ export function createReActAgent(config: FunctionalReActConfig) {
         runConfig?.configurable?.thread_id ||
         validatedConfig.threadId ||
         input.configurable?.thread_id ||
-        uuidv4()
+        Bun.randomUUIDv7()
 
       const baseConfigurable: AgentConfigurable = {
         thread_id: threadId,
@@ -228,7 +228,7 @@ export function createReActAgent(config: FunctionalReActConfig) {
           { configurable: baseConfigurable }
         )
       } catch (error) {
-        logger.error('Agent execution failed', { threadId, error })
+        logError(threadId, error instanceof Error ? error.message : String(error))
         throw error
       }
     },

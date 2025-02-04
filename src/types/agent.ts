@@ -4,6 +4,75 @@ import { MemorySaver } from '@langchain/langgraph-checkpoint'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { z } from 'zod'
 
+// Shared schemas
+export const ConfigurableSchema = z.object({
+  thread_id: z.string(),
+  checkpoint_ns: z.string(),
+  [Symbol.toStringTag]: z.literal('AgentConfigurable'),
+}).passthrough().optional()
+
+export const SafetyConfigSchema = z.object({
+  requireToolConfirmation: z.boolean().default(true).optional(),
+  requireToolFeedback: z.boolean().default(true).optional(),
+  maxInputLength: z.number().min(1).max(16384).default(8192).optional(),
+  dangerousToolPatterns: z
+    .array(z.string())
+    .default([
+      'drop',
+      'truncate',
+      'exec',
+      'curl',
+      'wget',
+      'bash -c',
+      'rm  -rf /',
+      'zsh -c',
+      'sh -c',
+    ])
+    .optional(),
+}).optional()
+
+export const MessageSchema = z.object({
+  role: z.string(),
+  content: z.string(),
+})
+
+export const MessagesSchema = z.array(MessageSchema).min(1, 'At least one message is required')
+
+// Base schema for all requests
+export const BaseRequestSchema = z.object({
+  threadId: z.string().optional(),
+  modelName: z.string().optional(),
+  host: z.string().optional(),
+  safetyConfig: SafetyConfigSchema,
+  configurable: ConfigurableSchema,
+})
+
+// Chat/Edit/Compose request schema
+export const ChatRequestSchema = BaseRequestSchema.extend({
+  messages: MessagesSchema,
+})
+
+// Sync request schema
+export const SyncRequestSchema = BaseRequestSchema.extend({
+  root: z.string(),
+  excludePatterns: z.array(z.string()).optional(),
+})
+
+// Configuration schema with strong typing
+export const FunctionalReActConfigSchema = BaseRequestSchema.extend({
+  memoryPersistence: z
+    .instanceof(MemorySaver)
+    .default(() => new MemorySaver())
+    .optional(),
+  maxIterations: z.number().min(1).max(30).default(10).optional(),
+  userInputTimeout: z.number().min(0).max(36000).default(300).optional(),
+  chatModel: z.instanceof(BaseChatModel).optional(),
+}).transform(data => ({
+  ...data,
+  modelName: data.modelName || 'qwen2.5-coder:7b',
+  host: data.host || 'http://localhost:11434',
+}))
+
 // Core agent state interface
 export interface AgentState {
   messages: BaseMessage[]
@@ -84,48 +153,6 @@ export interface ToolExecutorConfig {
   safetyConfig: SafetyConfig
   runConfig?: RunnableConfig
 }
-
-// Configuration schema with strong typing
-export const FunctionalReActConfigSchema = z.object({
-  modelName: z.string().default('qwen2.5-coder:7b').optional(),
-  host: z.string().default('http://localhost:11434').optional(),
-  threadId: z.string().optional(),
-  memoryPersistence: z
-    .instanceof(MemorySaver)
-    .default(() => new MemorySaver())
-    .optional(),
-  maxIterations: z.number().min(1).max(30).default(10).optional(),
-  userInputTimeout: z.number().min(0).max(36000).default(300).optional(),
-  chatModel: z.instanceof(BaseChatModel).optional(),
-  safetyConfig: z
-    .object({
-      requireToolConfirmation: z.boolean().default(true).optional(),
-      requireToolFeedback: z.boolean().default(true).optional(),
-      maxInputLength: z.number().min(1).max(16384).default(8192).optional(),
-      dangerousToolPatterns: z
-        .array(z.string())
-        .default([
-          'drop',
-          'truncate',
-          'exec',
-          'curl',
-          'wget',
-          'bash -c',
-          'rm  -rf /',
-          'zsh -c',
-          'sh -c',
-        ])
-        .optional(),
-    })
-    .optional(),
-  configurable: z
-    .object({
-      thread_id: z.string(),
-      checkpoint_ns: z.string(),
-      [Symbol.toStringTag]: z.literal('AgentConfigurable'),
-    })
-    .passthrough(),
-})
 
 export type FunctionalReActConfig = z.infer<typeof FunctionalReActConfigSchema>
 

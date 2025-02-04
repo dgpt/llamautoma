@@ -1,7 +1,7 @@
 import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages'
 import { AgentState, SafetyCheckResult, ToolExecutionResult } from '@/types/agent'
-import { logger } from '@/logger'
-import { formatXMLResponse } from '@/xml'
+import { logError } from '@/logger'
+import { formatXMLResponse } from '@/utils/xml'
 
 // Wait for user input with timeout
 const waitForUserInput = async (
@@ -50,7 +50,9 @@ const waitForUserInput = async (
       userInput,
     }
   } catch (error) {
-    logger.error({ error }, 'Error waiting for user input')
+    logError(state.threadId, error instanceof Error ? error.message : String(error), {
+      toolName: 'waitForUserInput',
+    })
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return {
       messages: [
@@ -100,7 +102,6 @@ export const UserInteractionManager = {
       }
 
       // Wait for confirmation
-      logger.info({ toolName, toolArgs }, 'Requesting tool execution confirmation')
       const confirmationResult = await waitForUserInput(stateWithRequest)
 
       const confirmed = confirmationResult.userInput?.toLowerCase() === 'yes'
@@ -116,7 +117,7 @@ export const UserInteractionManager = {
         userConfirmed: confirmed,
       }
     } catch (error) {
-      logger.error({ error, toolName }, 'Error requesting tool confirmation')
+      logError(state.threadId, error instanceof Error ? error.message : String(error), { toolName })
       return {
         messages: [
           ...state.messages,
@@ -195,7 +196,6 @@ export const UserInteractionManager = {
       }
 
       // Wait for feedback
-      logger.info({ toolName, result, safetyResult }, 'Requesting tool execution feedback')
       const feedbackResult = await waitForUserInput(stateWithRequest)
 
       const finalFeedbackMessage = new AIMessage(
@@ -213,7 +213,7 @@ export const UserInteractionManager = {
               },
       }
     } catch (error) {
-      logger.error({ error, toolName }, 'Error handling tool feedback')
+      logError(state.threadId, error instanceof Error ? error.message : String(error), { toolName })
       return {
         messages: [
           ...state.messages,

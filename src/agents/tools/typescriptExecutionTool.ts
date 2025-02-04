@@ -1,6 +1,5 @@
-import { Tool } from '@langchain/core/tools'
 import { z } from 'zod'
-import { logger } from '@/logger'
+import { logError } from '@/logger'
 import { createContext, runInContext } from 'vm'
 import { StructuredTool } from '@langchain/core/tools'
 
@@ -21,11 +20,9 @@ interface ExecutionContext {
   lastValue: any
 }
 
-interface ErrorDetails {
-  name?: string
-  message?: string
-  stack?: string
-  error?: unknown
+interface ExecutionResult {
+  result: string
+  logs: string[]
 }
 
 export class TypeScriptExecutionTool extends StructuredTool {
@@ -48,65 +45,39 @@ export class TypeScriptExecutionTool extends StructuredTool {
 
   async _call(input: { code: string }): Promise<string> {
     try {
-      logger.debug('Executing TypeScript code', { input })
-      const result = await this.executeCode(input.code)
-      logger.debug('Execution complete', { result })
-      return result
-    } catch (error) {
-      const errorDetails: ErrorDetails =
-        error instanceof Error
-          ? {
-              name: error.name,
-              message: error.message,
-              stack: error.stack,
-            }
-          : { error }
-
-      logger.error('TypeScript execution failed', { errorDetails })
-      throw error
-    }
-  }
-
-  private async executeCode(code: string): Promise<string> {
-    try {
-      // Create a safe execution environment
+      // Create execution context
       this.currentContext = {
         console: {
-          log: (...args: any[]) => this.captureOutput(args),
-          error: (...args: any[]) => this.captureOutput(args, 'error'),
-          warn: (...args: any[]) => this.captureOutput(args, 'warn'),
-          info: (...args: any[]) => this.captureOutput(args, 'info'),
+          log: (...args) => this.captureOutput(args, 'log'),
+          error: (...args) => this.captureOutput(args, 'error'),
+          warn: (...args) => this.captureOutput(args, 'warn'),
+          info: (...args) => this.captureOutput(args, 'info'),
         },
         output: [],
         iterations: 0,
         lastValue: undefined,
       }
 
-      // Create a secure VM context
-      const vmContext = createContext({
-        console: this.currentContext.console,
-      })
+      // Execute code
+      const result = runInContext(
+        `function main() { ${input.code} } main()`,
+        createContext(this.currentContext)
+      )
+      this.currentContext.lastValue = result
 
-      // Execute code in secure context
-      this.currentContext.lastValue = runInContext(code, vmContext, {
-        timeout: 1000, // 1 second timeout
-        displayErrors: true,
-      })
+      // Format output and logs
+      const executionResult: ExecutionResult = {
+        result: String(result),
+        logs: this.currentContext.output,
+      }
 
-      const output = this.currentContext.output.join('\n')
-      const result = this.currentContext.lastValue
-      return output ? `${output}\n${result}` : String(result)
+      // Return formatted result
+      if (executionResult.logs.length > 0) {
+        return `${executionResult.result}${executionResult.logs.length > 0 ? `\n\nLogs:\n${executionResult.logs.join('\n')}` : ''}`
+      }
+      return executionResult.result
     } catch (error) {
-      const errorDetails: ErrorDetails =
-        error instanceof Error
-          ? {
-              name: error.name,
-              message: error.message,
-              stack: error.stack,
-            }
-          : { error }
-
-      logger.error('Code execution failed', { errorDetails, code })
+      logError('typescript-execution', error instanceof Error ? error.message : String(error))
       throw error
     } finally {
       this.currentContext = null

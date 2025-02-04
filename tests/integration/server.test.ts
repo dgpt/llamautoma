@@ -1,8 +1,6 @@
 import { expect, test, describe, beforeAll, afterAll } from 'bun:test'
-import { DynamicTool } from '@langchain/core/tools'
 import { logger } from '@/logger'
 import server from '@/index'
-import { ReActResponseSchema } from '@/types/agent'
 
 interface StreamEvent {
   event: string
@@ -66,42 +64,6 @@ const readStreamWithTimeout = async (
   return allEvents
 }
 
-const validateStreamEventResponse = (event: StreamEvent, type: string): boolean => {
-  if (!event.data?.content) return false
-  try {
-    const response = JSON.parse(event.data.content)
-    if (type === 'start') {
-      // For start events, we only care about the type
-      return response.type === type
-    }
-    return ReActResponseSchema.safeParse(response).success && response.type === type
-  } catch {
-    return false
-  }
-}
-
-const validateStreamEventContent = (
-  event: StreamEvent,
-  type: string,
-  contentPredicate: (content: any) => boolean
-): boolean => {
-  if (!event.data?.content) return false
-  try {
-    const response = JSON.parse(event.data.content)
-    if (type === 'start') {
-      // For start events, we only care about the type
-      return response.type === type && contentPredicate(response)
-    }
-    return (
-      ReActResponseSchema.safeParse(response).success &&
-      response.type === type &&
-      contentPredicate(response)
-    )
-  } catch {
-    return false
-  }
-}
-
 describe('Server Integration Tests', () => {
   beforeAll(() => {
     process.env.NODE_ENV = 'test'
@@ -118,11 +80,10 @@ describe('Server Integration Tests', () => {
 
     try {
       const response = await server.fetch(
-        new Request('http://localhost:3001/chat', {
+        new Request('http://localhost:3000/v1/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            type: 'chat',
             messages: [{ role: 'user', content: 'Tell me about TypeScript' }],
             modelName: 'qwen2.5-coder:1.5b',
             host: 'http://localhost:11434',
@@ -174,7 +135,7 @@ describe('Server Integration Tests', () => {
 
   test('should handle invalid request method', async () => {
     const response = await server.fetch(
-      new Request('http://localhost:3001/chat', {
+      new Request('http://localhost:3000/v1/chat', {
         method: 'GET',
       })
     )
@@ -186,7 +147,7 @@ describe('Server Integration Tests', () => {
 
   test('should handle invalid JSON in request body', async () => {
     const response = await server.fetch(
-      new Request('http://localhost:3001/chat', {
+      new Request('http://localhost:3000/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: 'invalid json',
@@ -200,24 +161,24 @@ describe('Server Integration Tests', () => {
 
   test('should handle invalid chat request without messages', async () => {
     const response = await server.fetch(
-      new Request('http://localhost:3001/chat', {
+      new Request('http://localhost:3000/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: 'chat',
+          messages: [],
         }),
       })
     )
 
     expect(response.status).toBe(500)
     const data = await response.json()
-    expect(data.error).toBe('Request processing failed')
+    expect(data.error).toBe('Request failed')
     expect(data.details).toContain('Invalid chat request: messages array is required')
   })
 
   test('should handle invalid endpoint', async () => {
     const response = await server.fetch(
-      new Request('http://localhost:3001/invalid', {
+      new Request('http://localhost:3000/invalid', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -235,11 +196,10 @@ describe('Server Integration Tests', () => {
 
     try {
       const response = await server.fetch(
-        new Request('http://localhost:3001/chat', {
+        new Request('http://localhost:3000/v1/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            type: 'chat',
             threadId: customThreadId,
             messages: [{ role: 'user', content: 'Hello' }],
             modelName: 'qwen2.5-coder:1.5b',
@@ -282,11 +242,10 @@ describe('Server Integration Tests', () => {
   test('should enforce maxInputLength safety check', async () => {
     const longInput = 'a'.repeat(8193) // Exceeds maxInputLength of 8192
     const response = await server.fetch(
-      new Request('http://localhost:3001/chat', {
+      new Request('http://localhost:3000/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: 'chat',
           messages: [{ role: 'user', content: longInput }],
           modelName: 'qwen2.5-coder:1.5b',
           host: 'http://localhost:11434',
