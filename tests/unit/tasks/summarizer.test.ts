@@ -1,15 +1,8 @@
-import { expect, test, describe, beforeEach } from 'bun:test'
+import { expect, test, describe } from 'bun:test'
 import { summarizerTask } from '@/ai/tasks/summarizer'
 import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages'
-import { createTestContext, type TestContext } from '../utils'
 
 describe('Summarizer Task Tests', () => {
-  let ctx: TestContext
-
-  beforeEach(() => {
-    ctx = createTestContext()
-  })
-
   test('should summarize short conversation', async () => {
     const messages = [
       new SystemMessage('You are a helpful assistant.'),

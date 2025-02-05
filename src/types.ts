@@ -17,7 +17,6 @@ import {
   BaseResponse,
   FileOp,
   CommandOp,
-  ToolTypeSchema,
 } from 'llamautoma-types'
 
 // Task types

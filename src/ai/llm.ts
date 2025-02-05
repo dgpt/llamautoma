@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ChatOllama } from '@langchain/ollama'
 import { DEFAULT_AGENT_CONFIG } from '@/config'
+import { StructuredOutputParser } from '@langchain/core/output_parsers'
 
 // Schema for feedback
 export const feedbackSchema = z.object({
@@ -19,5 +20,6 @@ export const llm = new ChatOllama({
 
 // Create LLM with structured output
 export function createStructuredLLM<T>(schema: z.ZodType<T>) {
-  return llm.withStructuredOutput(schema)
+  const parser = StructuredOutputParser.fromZodSchema(schema)
+  return llm.pipe(parser)
 }

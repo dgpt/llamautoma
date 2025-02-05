@@ -1,162 +1,140 @@
-import { expect, test, describe, beforeAll } from 'bun:test'
-import { DiffTool } from '@/ai/tools/diff'
-import { mock, Mock } from 'bun:test'
-import { waitForClientResponse } from '@/ai/utils/stream'
+import { expect, test, describe, beforeEach } from 'bun:test'
+import { SystemMessage } from '@langchain/core/messages'
+import { createTestContext, TestContext, waitForResponse } from '../utils'
 
-// Mock the stream module
-mock.module('@/ai/utils/stream', () => ({
-  streamToClient: async () => {},
-  waitForClientResponse: mock(() => Promise.resolve()),
-}))
+describe('Diff Tool', () => {
+  let ctx: TestContext
 
-describe('DiffTool', () => {
-  let diffTool: DiffTool
-  let mockWaitForResponse: Mock<typeof waitForClientResponse>
-
-  beforeAll(() => {
-    diffTool = new DiffTool()
-    mockWaitForResponse = mock(waitForClientResponse)
+  beforeEach(() => {
+    ctx = createTestContext()
   })
 
-  test('should generate diff for new file', async () => {
-    // Mock stream responses for a non-existent file
-    mockWaitForResponse
-      .mockResolvedValueOnce({
-        type: 'file_chunk',
-        data: {
-          path: 'test.ts',
-          chunk: '',
-          done: true,
-          error: 'File not found',
-        },
-      })
-      .mockResolvedValueOnce({
-        type: 'file_complete',
-      })
+  test('should generate diff for file modifications', async () => {
+    const existingCode = `
+import React from 'react';
 
-    const input = {
-      files: [
-        {
-          path: 'test.ts',
-          content: 'console.log("Hello World")',
-          language: 'typescript',
-        },
-      ],
-    }
+export const Counter = () => {
+  let count = 0;
+  const increment = () => count++;
+  const decrement = () => count--;
+  return (
+    <div>
+      <button onClick={decrement}>-</button>
+      <span>{count}</span>
+      <button onClick={increment}>+</button>
+    </div>
+  );
+};`
 
-    const result = await diffTool.call(input)
-    const parsed = JSON.parse(result)
+    const generatedCode = `
+import React, { useState } from 'react';
 
-    expect(parsed).toHaveLength(1)
-    expect(parsed[0]).toHaveProperty('path', 'test.ts')
-    expect(parsed[0]).toHaveProperty('diff')
-    expect(parsed[0].diff).toEqual([[1, 'console.log("Hello World")']])
+interface CounterProps {
+  initialValue?: number;
+}
+
+export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
+  const [count, setCount] = useState(initialValue);
+  const increment = () => setCount(prev => prev + 1);
+  const decrement = () => setCount(prev => prev - 1);
+  return (
+    <div className="counter">
+      <button onClick={decrement}>-</button>
+      <span>{count}</span>
+      <button onClick={increment}>+</button>
+    </div>
+  );
+};`
+
+    const messages = [
+      new SystemMessage('You are a diff generator. Generate a diff between these files.'),
+      new SystemMessage(
+        JSON.stringify({
+          existingFile: {
+            path: 'src/components/Counter.tsx',
+            content: existingCode,
+          },
+          generatedFile: {
+            path: 'src/components/Counter.tsx',
+            content: generatedCode,
+          },
+        })
+      ),
+    ]
+
+    const result = await waitForResponse(ctx.chatModel.invoke(messages))
+    const diff = result.content as string
+
+    // Validate diff format
+    expect(diff).toBeTruthy()
+    expect(diff).toContain('diff')
+    expect(diff).toContain('useState')
+    expect(diff).toContain('let count = 0')
+    expect(diff).toContain('CounterProps')
   })
 
-  test('should generate diff for modified file', async () => {
-    // Mock stream responses for an existing file
-    mockWaitForResponse
-      .mockResolvedValueOnce({
-        type: 'file_chunk',
-        data: {
-          path: 'test.ts',
-          chunk: 'console.log("Hello")',
-          done: true,
-        },
-      })
-      .mockResolvedValueOnce({
-        type: 'file_complete',
-      })
+  test('should handle new file creation', async () => {
+    const newFileContent = `
+import React from 'react';
+import { Counter } from './Counter';
 
-    const input = {
-      files: [
-        {
-          path: 'test.ts',
-          content: 'console.log("Hello World")',
-          language: 'typescript',
-        },
-      ],
-    }
+export const App = () => {
+  return (
+    <div>
+      <h1>Counter App</h1>
+      <Counter initialValue={5} />
+    </div>
+  );
+};`
 
-    const result = await diffTool.call(input)
-    const parsed = JSON.parse(result)
+    const messages = [
+      new SystemMessage('You are a diff generator. Generate a diff for this new file.'),
+      new SystemMessage(
+        JSON.stringify({
+          generatedFile: {
+            path: 'src/components/App.tsx',
+            content: newFileContent,
+          },
+        })
+      ),
+    ]
 
-    expect(parsed).toHaveLength(1)
-    expect(parsed[0]).toHaveProperty('path', 'test.ts')
-    expect(parsed[0]).toHaveProperty('diff')
-    // The diff should show the change from "Hello" to "Hello World"
-    expect(parsed[0].diff).toEqual([
-      [0, 'console.log("Hello'],
-      [1, ' World'],
-      [0, '")'],
-    ])
+    const result = await waitForResponse(ctx.chatModel.invoke(messages))
+    const diff = result.content as string
+
+    expect(diff).toBeTruthy()
+    expect(diff).toContain('diff')
+    expect(diff).toContain('new file')
+    expect(diff).toContain('Counter initialValue={5}')
   })
 
-  test('should handle multiple files', async () => {
-    // Mock stream responses for multiple files
-    mockWaitForResponse
-      .mockResolvedValueOnce({
-        type: 'file_chunk',
-        data: {
-          path: 'test1.ts',
-          chunk: 'console.log("Hello")',
-          done: true,
-        },
-      })
-      .mockResolvedValueOnce({
-        type: 'file_chunk',
-        data: {
-          path: 'test2.ts',
-          chunk: '',
-          done: true,
-          error: 'File not found',
-        },
-      })
-      .mockResolvedValueOnce({
-        type: 'file_complete',
-      })
+  test('should handle file deletion', async () => {
+    const existingCode = `
+import React from 'react';
 
-    const input = {
-      files: [
-        {
-          path: 'test1.ts',
-          content: 'console.log("Hello World")',
-          language: 'typescript',
-        },
-        {
-          path: 'test2.ts',
-          content: 'console.log("New file")',
-          language: 'typescript',
-        },
-      ],
-    }
+// Deprecated component to be removed
+export const OldCounter = () => {
+  return <div>Old counter implementation</div>;
+};`
 
-    const result = await diffTool.call(input)
-    const parsed = JSON.parse(result)
+    const messages = [
+      new SystemMessage('You are a diff generator. Generate a diff for this file deletion.'),
+      new SystemMessage(
+        JSON.stringify({
+          existingFile: {
+            path: 'src/components/OldCounter.tsx',
+            content: existingCode,
+          },
+          action: 'delete',
+        })
+      ),
+    ]
 
-    expect(parsed).toHaveLength(2)
-    expect(parsed[0]).toHaveProperty('path', 'test1.ts')
-    expect(parsed[1]).toHaveProperty('path', 'test2.ts')
-    expect(parsed[1]).toHaveProperty('error')
-  })
+    const result = await waitForResponse(ctx.chatModel.invoke(messages))
+    const diff = result.content as string
 
-  test('should handle stream errors', async () => {
-    // Mock stream error response
-    mockWaitForResponse.mockResolvedValueOnce({
-      type: 'error',
-      error: 'Failed to read files',
-    })
-
-    const input = {
-      files: [
-        {
-          path: 'test.ts',
-          content: 'console.log("Hello")',
-          language: 'typescript',
-        },
-      ],
-    }
-
-    await expect(diffTool.call(input)).rejects.toThrow('Failed to generate diff')
+    expect(diff).toBeTruthy()
+    expect(diff).toContain('diff')
+    expect(diff).toContain('deleted file')
   })
 })

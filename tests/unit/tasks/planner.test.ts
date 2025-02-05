@@ -1,23 +1,17 @@
-import { expect, test, describe, beforeEach } from 'bun:test'
+import { expect, test, describe } from 'bun:test'
 import { HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { plannerTask } from '../../../src/ai/tasks/planner'
 import { PlanSchema, type Plan } from 'llamautoma-types'
-import { createTestContext, type TestContext } from '../utils'
+import { runWithTestConfig } from '../utils'
 
 describe('Planner Task Tests', () => {
-  let ctx: TestContext
-
-  beforeEach(() => {
-    ctx = createTestContext()
-  })
-
   test('should create a valid plan for a clear request', async () => {
     const messages = [
       new SystemMessage('You are a code generation assistant.'),
       new HumanMessage('Create a React counter component with TypeScript support.'),
     ]
 
-    const result = await plannerTask({
+    const result = await runWithTestConfig<Plan>(plannerTask, {
       messages,
     })
 
@@ -32,7 +26,7 @@ describe('Planner Task Tests', () => {
       new HumanMessage('Make it better.'),
     ]
 
-    const result = await plannerTask({
+    const result = await runWithTestConfig<Plan>(plannerTask, {
       messages,
     })
 
@@ -47,7 +41,7 @@ describe('Planner Task Tests', () => {
       new HumanMessage('Create a full-stack web app with React frontend and Node.js backend.'),
     ]
 
-    const result = await plannerTask({
+    const result = await runWithTestConfig<Plan>(plannerTask, {
       messages,
     })
 
@@ -63,7 +57,7 @@ describe('Planner Task Tests', () => {
       new SystemMessage('Previous feedback: Add TypeScript support and error handling.'),
     ]
 
-    const result = await plannerTask({
+    const result = await runWithTestConfig<Plan>(plannerTask, {
       messages,
       feedback: {
         approved: false,
@@ -72,7 +66,9 @@ describe('Planner Task Tests', () => {
     })
 
     expect(() => PlanSchema.parse(result)).not.toThrow()
-    expect(result.steps.some(step => step.toLowerCase().includes('typescript'))).toBe(true)
-    expect(result.steps.some(step => step.toLowerCase().includes('error'))).toBe(true)
+    expect(result.steps.some((step: string) => step.toLowerCase().includes('typescript'))).toBe(
+      true
+    )
+    expect(result.steps.some((step: string) => step.toLowerCase().includes('error'))).toBe(true)
   })
 })
