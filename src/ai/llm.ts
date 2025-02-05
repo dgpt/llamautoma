@@ -26,12 +26,7 @@ export function createStructuredLLM<T>(schema: z.ZodType<T>) {
   const formatInstructions = parser.getFormatInstructions()
 
   return RunnableSequence.from([
-    (messages: BaseMessage[]) => [
-      new SystemMessage(
-        `You are a helpful AI assistant that always responds in the following format:\n\n${formatInstructions}`
-      ),
-      ...messages,
-    ],
+    (messages: BaseMessage[]) => [new SystemMessage(formatInstructions), ...messages],
     llm,
     response => parser.parse(response.content),
   ])

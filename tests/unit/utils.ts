@@ -47,8 +47,8 @@ export const createTestContext = (): TestContext => ({
 export const waitForResponse = async <T>(promise: Promise<T>): Promise<T> => {
   const result = await Promise.race([
     promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Response timeout')), TEST_TIMEOUT)
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Response timeout after ${TEST_TIMEOUT}ms`)), TEST_TIMEOUT)
     ),
   ])
   return result as T
