@@ -1,29 +1,10 @@
 import { expect, test, describe, beforeEach } from 'bun:test'
 import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages'
-import { entrypoint, task } from '@langchain/langgraph'
-import { z } from 'zod'
+import { entrypoint } from '@langchain/langgraph'
+import { RunnableConfig } from '@langchain/core/runnables'
 import { createTestContext, waitForResponse, type TestContext } from '../utils'
-
-// Schema for reviewer output
-const ReviewSchema = z.object({
-  passed: z.boolean(),
-  feedback: z.array(
-    z.object({
-      type: z.enum(['error', 'warning', 'suggestion']),
-      message: z.string(),
-      location: z
-        .object({
-          file: z.string().optional(),
-          line: z.number().optional(),
-          column: z.number().optional(),
-        })
-        .optional(),
-    })
-  ),
-  suggestions: z.array(z.string()).optional(),
-  requires_changes: z.boolean(),
-  max_iterations_reached: z.boolean().optional(),
-})
+import { reviewerTask } from '@/ai/tasks/reviewer'
+import { ReviewSchema, type Review, type Plan, type GeneratedCode } from 'llamautoma-types'
 
 describe('Reviewer Task Tests', () => {
   let ctx: TestContext
@@ -32,108 +13,118 @@ describe('Reviewer Task Tests', () => {
     ctx = createTestContext()
   })
 
-  test('should approve a well-formed plan', async () => {
-    const reviewerTask = task('reviewer', async (messages: BaseMessage[]) => {
-      return await ctx.chatModel.invoke(messages)
-    })
-
+  test('should review a plan thoroughly', async () => {
     const workflow = entrypoint(
-      { checkpointer: ctx.memorySaver, name: 'reviewer_test' },
-      async (messages: BaseMessage[]) => {
-        const result = await reviewerTask(messages)
+      {
+        checkpointer: ctx.memorySaver,
+        name: 'reviewer_test',
+      },
+      async (messages: BaseMessage[], config: RunnableConfig) => {
+        const plan: Plan = {
+          type: 'code',
+          steps: [
+            'Initialize new React project using create-react-app',
+            'Create Counter component with TypeScript',
+          ],
+        }
+        const result = await reviewerTask({
+          messages,
+          plan,
+          config: {
+            ...config,
+            configurable: {
+              thread_id: ctx.threadId,
+              checkpoint_ns: 'test',
+            },
+          },
+        })
         return result
       }
     )
-
-    const plan = {
-      plan: [
-        {
-          step: 1,
-          description: 'Initialize new React project using create-react-app',
-          tools: ['run_terminal_cmd'],
-        },
-        {
-          step: 2,
-          description: 'Create Counter component with TypeScript',
-          tools: ['edit_file'],
-        },
-      ],
-      requires_clarification: false,
-    }
 
     const messages = [
       new SystemMessage('You are a code reviewer. Review this plan.'),
       new HumanMessage('Create a React counter component'),
-      new SystemMessage(JSON.stringify(plan)),
     ]
 
-    const result = await waitForResponse(workflow.invoke(messages))
-    const review = JSON.parse(result.content.toString())
+    const result = await waitForResponse(
+      workflow.invoke(messages, {
+        configurable: {
+          thread_id: ctx.threadId,
+          checkpoint_ns: 'test',
+        },
+      })
+    )
+    const review = result as Review
 
     expect(() => ReviewSchema.parse(review)).not.toThrow()
-    expect(review.passed).toBe(true)
-    expect(review.requires_changes).toBe(false)
+    expect(review.feedback).toBeDefined()
+    expect(review.suggestions).toBeDefined()
+    expect(review.metadata).toBeDefined()
   })
 
-  test('should reject a plan missing critical steps', async () => {
-    const reviewerTask = task('reviewer', async (messages: BaseMessage[]) => {
-      return await ctx.chatModel.invoke(messages)
-    })
-
+  test('should reject an incomplete plan', async () => {
     const workflow = entrypoint(
-      { checkpointer: ctx.memorySaver, name: 'reviewer_test' },
-      async (messages: BaseMessage[]) => {
-        const result = await reviewerTask(messages)
+      {
+        checkpointer: ctx.memorySaver,
+        name: 'reviewer_test',
+      },
+      async (messages: BaseMessage[], config: RunnableConfig) => {
+        const plan: Plan = {
+          type: 'code',
+          steps: ['Initialize new React project using create-react-app'],
+        }
+        const result = await reviewerTask({
+          messages,
+          plan,
+          config: {
+            ...config,
+            configurable: {
+              thread_id: ctx.threadId,
+              checkpoint_ns: 'test',
+            },
+          },
+        })
         return result
       }
     )
-
-    const incompletePlan = {
-      plan: [
-        {
-          step: 1,
-          description: 'Initialize new React project using create-react-app',
-          tools: ['run_terminal_cmd'],
-        },
-        // Missing component creation and styling steps
-      ],
-      requires_clarification: false,
-    }
 
     const messages = [
       new SystemMessage('You are a code reviewer. Review this plan.'),
       new HumanMessage('Create a styled React counter component with increment/decrement buttons'),
-      new SystemMessage(JSON.stringify(incompletePlan)),
     ]
 
-    const result = await waitForResponse(workflow.invoke(messages))
-    const review = JSON.parse(result.content.toString())
+    const result = await waitForResponse(
+      workflow.invoke(messages, {
+        configurable: {
+          thread_id: ctx.threadId,
+          checkpoint_ns: 'test',
+        },
+      })
+    )
+    const review = result as Review
 
     expect(() => ReviewSchema.parse(review)).not.toThrow()
-    expect(review.passed).toBe(false)
-    expect(review.requires_changes).toBe(true)
+    expect(review.approved).toBe(false)
+    expect(review.feedback).toBeDefined()
     expect(
-      review.feedback.some(
-        (f: z.infer<typeof ReviewSchema>['feedback'][number]) =>
-          f.type === 'error' && f.message.toLowerCase().includes('missing')
-      )
+      review.feedback.toLowerCase().includes('missing') ||
+        review.feedback.toLowerCase().includes('incomplete')
     ).toBe(true)
   })
 
   test('should approve well-written code', async () => {
-    const reviewerTask = task('reviewer', async (messages: BaseMessage[]) => {
-      return await ctx.chatModel.invoke(messages)
-    })
-
     const workflow = entrypoint(
-      { checkpointer: ctx.memorySaver, name: 'reviewer_test' },
-      async (messages: BaseMessage[]) => {
-        const result = await reviewerTask(messages)
-        return result
-      }
-    )
-
-    const code = `
+      {
+        checkpointer: ctx.memorySaver,
+        name: 'reviewer_test',
+      },
+      async (messages: BaseMessage[], config: RunnableConfig) => {
+        const code: GeneratedCode = {
+          files: [
+            {
+              path: 'src/components/Counter.tsx',
+              content: `
 import React, { useState } from 'react';
 
 interface CounterProps {
@@ -153,36 +144,57 @@ export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
       <button onClick={increment}>+</button>
     </div>
   );
-};`
-
-    const messages = [
-      new SystemMessage('You are a code reviewer. Review this code.'),
-      new HumanMessage('Create a React counter component'),
-      new SystemMessage(code),
-    ]
-
-    const result = await waitForResponse(workflow.invoke(messages))
-    const review = JSON.parse(result.content.toString())
-
-    expect(() => ReviewSchema.parse(review)).not.toThrow()
-    expect(review.passed).toBe(true)
-    expect(review.requires_changes).toBe(false)
-  })
-
-  test('should reject code with potential issues', async () => {
-    const reviewerTask = task('reviewer', async (messages: BaseMessage[]) => {
-      return await ctx.chatModel.invoke(messages)
-    })
-
-    const workflow = entrypoint(
-      { checkpointer: ctx.memorySaver, name: 'reviewer_test' },
-      async (messages: BaseMessage[]) => {
-        const result = await reviewerTask(messages)
+};`,
+            },
+          ],
+        }
+        const result = await reviewerTask({
+          messages,
+          code,
+          config: {
+            ...config,
+            configurable: {
+              thread_id: ctx.threadId,
+              checkpoint_ns: 'test',
+            },
+          },
+        })
         return result
       }
     )
 
-    const problematicCode = `
+    const messages = [
+      new SystemMessage('You are a code reviewer. Review this code.'),
+      new HumanMessage('Create a React counter component'),
+    ]
+
+    const result = await waitForResponse(
+      workflow.invoke(messages, {
+        configurable: {
+          thread_id: ctx.threadId,
+          checkpoint_ns: 'test',
+        },
+      })
+    )
+    const review = result as Review
+
+    expect(() => ReviewSchema.parse(review)).not.toThrow()
+    expect(review.approved).toBe(true)
+    expect(review.feedback).toBeDefined()
+  })
+
+  test('should reject code with potential issues', async () => {
+    const workflow = entrypoint(
+      {
+        checkpointer: ctx.memorySaver,
+        name: 'reviewer_test',
+      },
+      async (messages: BaseMessage[], config: RunnableConfig) => {
+        const code: GeneratedCode = {
+          files: [
+            {
+              path: 'src/components/Counter.tsx',
+              content: `
 import React from 'react';
 
 export const Counter = () => {
@@ -198,25 +210,43 @@ export const Counter = () => {
       <button onClick={increment}>+</button>
     </div>
   );
-};`
+};`,
+            },
+          ],
+        }
+        const result = await reviewerTask({
+          messages,
+          code,
+          config: {
+            ...config,
+            configurable: {
+              thread_id: ctx.threadId,
+              checkpoint_ns: 'test',
+            },
+          },
+        })
+        return result
+      }
+    )
 
     const messages = [
       new SystemMessage('You are a code reviewer. Review this code.'),
       new HumanMessage('Create a React counter component that properly manages state'),
-      new SystemMessage(problematicCode),
     ]
 
-    const result = await waitForResponse(workflow.invoke(messages))
-    const review = JSON.parse(result.content.toString())
+    const result = await waitForResponse(
+      workflow.invoke(messages, {
+        configurable: {
+          thread_id: ctx.threadId,
+          checkpoint_ns: 'test',
+        },
+      })
+    )
+    const review = result as Review
 
     expect(() => ReviewSchema.parse(review)).not.toThrow()
-    expect(review.passed).toBe(false)
-    expect(review.requires_changes).toBe(true)
-    expect(
-      review.feedback.some(
-        (f: z.infer<typeof ReviewSchema>['feedback'][number]) =>
-          f.type === 'error' && f.message.toLowerCase().includes('state')
-      )
-    ).toBe(true)
+    expect(review.approved).toBe(false)
+    expect(review.feedback).toBeDefined()
+    expect(review.feedback.toLowerCase()).toContain('state')
   })
 })

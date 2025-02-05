@@ -2,6 +2,8 @@ import { z } from 'zod'
 import { ChatOllama } from '@langchain/ollama'
 import { DEFAULT_AGENT_CONFIG } from '@/config'
 import { StructuredOutputParser } from '@langchain/core/output_parsers'
+import { SystemMessage, BaseMessage } from '@langchain/core/messages'
+import { RunnableSequence } from '@langchain/core/runnables'
 
 // Schema for feedback
 export const feedbackSchema = z.object({
@@ -21,5 +23,16 @@ export const llm = new ChatOllama({
 // Create LLM with structured output
 export function createStructuredLLM<T>(schema: z.ZodType<T>) {
   const parser = StructuredOutputParser.fromZodSchema(schema)
-  return llm.pipe(parser)
+  const formatInstructions = parser.getFormatInstructions()
+
+  return RunnableSequence.from([
+    (messages: BaseMessage[]) => [
+      new SystemMessage(
+        `You are a helpful AI assistant that always responds in the following format:\n\n${formatInstructions}`
+      ),
+      ...messages,
+    ],
+    llm,
+    response => parser.parse(response.content),
+  ])
 }

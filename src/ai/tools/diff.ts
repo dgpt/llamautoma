@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import { StructuredTool } from '@langchain/core/tools'
 import fastDiff, { Diff } from 'fast-diff'
-import { fileTask, FileResponse } from '../tasks/file'
+import { FileTool } from './file'
+import type { FileOp } from 'llamautoma-types'
 
 // Schema for diff input
 const diffInputSchema = z.object({
@@ -23,10 +24,20 @@ const diffOutputSchema = z.array(
   })
 )
 
+type FileResponse = {
+  [path: string]: FileOp
+}
+
 export class DiffTool extends StructuredTool {
   name = 'diff'
   description = 'Generate diffs between generated code and existing files in the workspace'
   schema = diffInputSchema
+  private fileTool: FileTool
+
+  constructor() {
+    super()
+    this.fileTool = new FileTool()
+  }
 
   async _call(input: z.infer<typeof diffInputSchema>): Promise<string> {
     try {
@@ -34,10 +45,12 @@ export class DiffTool extends StructuredTool {
       const filePaths = input.files.map(f => f.path)
 
       // Request original file contents from client
-      const originals = await fileTask({
-        type: 'files',
-        paths: filePaths,
-      })
+      const originals = JSON.parse(
+        await this.fileTool.invoke({
+          requestType: 'files',
+          paths: filePaths,
+        })
+      ) as FileResponse
 
       // Generate diffs for each file
       const changes = input.files.map(file => {
