@@ -1,3 +1,98 @@
+# Llamautoma Project Plan
+
+## Overview
+Llamautoma is a TypeScript-based AI agent framework built on LangChain.js and LangGraph.js. It provides a powerful server for AI-assisted code generation and management through a chat interface.
+
+## Architecture
+
+### Server Components
+1. HTTP Server (Bun)
+   - Exposes streaming endpoints for client communication
+   - Handles request validation and safety checks
+   - Manages client connections and streaming responses
+
+2. AI System (LangChain.js)
+   - Integrates with Ollama for model inference
+   - Uses LangGraph.js for workflow management
+   - Maintains conversation context and history
+
+3. File System Interface
+   - Handles workspace synchronization
+   - Respects .gitignore patterns
+   - Streams file content and updates
+
+### Client Communication
+1. Request Types
+   - Chat: Natural language interaction with AI
+   - Sync: Workspace synchronization and updates
+
+2. Response Format
+   - Server-Sent Events (SSE)
+   - JSON-formatted messages
+   - Progress updates and streaming content
+
+### Safety Features
+1. Input Validation
+   - Length limits
+   - Content filtering
+   - Rate limiting
+
+2. Tool Safety
+   - Confirmation requirements
+   - Feedback collection
+   - Pattern detection
+
+## Implementation Plan
+
+### Phase 1: Core Infrastructure
+1. Set up Bun server
+2. Implement streaming endpoints
+3. Configure LangChain.js integration
+
+### Phase 2: AI System
+1. Implement chat functionality
+2. Add workspace synchronization
+3. Set up LangGraph.js workflows
+
+### Phase 3: Safety & Testing
+1. Add input validation
+2. Implement safety checks
+3. Write comprehensive tests
+
+## Testing Strategy
+1. Unit Tests
+   - Core functionality
+   - Request handling
+   - Safety features
+
+2. Integration Tests
+   - API endpoints
+   - AI system
+   - File operations
+
+3. End-to-End Tests
+   - Complete workflows
+   - Error scenarios
+   - Performance testing
+
+## Documentation
+1. API Reference
+2. Setup Guide
+3. Usage Examples
+4. Safety Guidelines
+
+## Deployment
+1. Development Environment
+2. Staging Setup
+3. Production Release
+
+## Timeline
+- Phase 1: 1 week
+- Phase 2: 2 weeks
+- Phase 3: 1 week
+- Testing & Documentation: 1 week
+- Total: 5 weeks
+
 # Refactoring src/agents
 We will remove src/agents and replace it with src/ai.
 Project structure will look something like this:

@@ -1,13 +1,34 @@
 import { z } from 'zod'
 import { RunnableConfig as LangChainRunnableConfig } from '@langchain/core/runnables'
+import {
+  Message,
+  Messages,
+  Safety as SafetyCheck,
+  ToolType,
+  Param as ToolParam,
+  Tool,
+  Call as ToolCall,
+  ToolResult,
+  Feedback as ToolFeedback,
+  Registry as ToolRegistry,
+  TaskState,
+  Task,
+  WorkflowState,
+  BaseResponse,
+  FileOp,
+  CommandOp,
+  ToolTypeSchema,
+} from 'llamautoma-types'
 
-// Basic message schemas
-export const MessageSchema = z.object({
-  role: z.string(),
-  content: z.string(),
-})
-
-export const MessagesSchema = z.array(MessageSchema).min(1, 'At least one message is required')
+// Task types
+export const TaskTypeSchema = z.enum([
+  'code', // coder is writing code based on the plan
+  'chat', // planner has decided no plan is needed, so we're just chatting
+  'plan', // planner is creating a plan based on the conversation
+  'review', // reviewer is reviewing the coder's output
+  'summarize', // summarizer is summarizing the conversation
+])
+export type TaskType = z.infer<typeof TaskTypeSchema>
 
 // Safety configuration schema and types
 export const SafetyConfigSchema = z
@@ -69,7 +90,12 @@ export type BaseRequest = z.infer<typeof BaseRequestSchema>
 
 // Chat/Edit/Compose request schema
 export const ChatRequestSchema = BaseRequestSchema.extend({
-  messages: MessagesSchema,
+  messages: z.array(
+    z.object({
+      role: z.string(),
+      content: z.string(),
+    })
+  ),
 })
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>
@@ -82,39 +108,18 @@ export const SyncRequestSchema = BaseRequestSchema.extend({
 
 export type SyncRequest = z.infer<typeof SyncRequestSchema>
 
-export interface SafetyConfig {
-  requireToolConfirmation: boolean
-  requireToolFeedback: boolean
-  maxInputLength: number
-  dangerousToolPatterns: string[]
-}
-
-export interface SafetyCheckResult {
-  passed: boolean
-  reason?: string
-  warnings?: string[]
-}
-
-// Tool execution types
-export interface ToolExecutionResult {
-  success: boolean
-  output: string
-  error?: Error
-  safetyResult?: SafetyCheckResult
-}
-
-export interface UserInteractionResult {
-  confirmed: boolean
-  feedback?: string
-}
-
 // Base runnable configuration
 export interface RunnableConfig extends Omit<LangChainRunnableConfig, 'configurable'> {
   modelName: string
   host: string
   threadId?: string
   checkpoint?: string
-  safetyConfig?: SafetyConfig
+  safetyConfig?: {
+    requireToolConfirmation: boolean
+    requireToolFeedback: boolean
+    maxInputLength: number
+    dangerousToolPatterns: string[]
+  }
   memoryPersist?: boolean
   configurable?: {
     thread_id: string
@@ -122,3 +127,41 @@ export interface RunnableConfig extends Omit<LangChainRunnableConfig, 'configura
     [Symbol.toStringTag]: string
   }
 }
+
+// Streaming response types
+export type StreamingResponse = {
+  type: 'status' | 'result' | 'error' | 'chat'
+  content: string | Record<string, any>
+}
+
+// Default values for tool results
+export const DEFAULT_TOOL_RESULT: ToolResult = {
+  success: true,
+  output: undefined,
+}
+
+// Default values for safety check
+export const DEFAULT_SAFETY_CHECK: SafetyCheck = {
+  passed: true,
+}
+
+// Re-export shared types
+export type {
+  Message,
+  Messages,
+  SafetyCheck,
+  ToolType,
+  ToolParam,
+  Tool,
+  ToolCall,
+  ToolResult,
+  ToolFeedback,
+  ToolRegistry,
+  TaskState,
+  Task,
+  WorkflowState,
+  BaseResponse,
+  FileOp,
+  CommandOp,
+}
+

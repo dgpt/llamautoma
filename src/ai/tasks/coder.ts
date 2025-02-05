@@ -1,37 +1,12 @@
-import { z } from 'zod'
 import { BaseMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
 import { createStructuredLLM } from '../llm'
-import { getMessageString } from './utils'
-import type { Plan } from './planner'
-import type { Feedback } from '../llm'
-
-// Schema for generated code
-export const codeSchema = z.object({
-  files: z.array(
-    z.object({
-      path: z.string(),
-      content: z.string(),
-      language: z.string(),
-    })
-  ),
-  dependencies: z
-    .array(
-      z.object({
-        name: z.string(),
-        version: z.string(),
-        type: z.enum(['npm', 'pip', 'cargo', 'go']),
-      })
-    )
-    .optional(),
-  approved: z.boolean(),
-  feedback: z.string().optional(),
-})
-
-export type GeneratedCode = z.infer<typeof codeSchema>
+import { GeneratedCodeSchema } from 'llamautoma-types'
+import type { Feedback, Plan, GeneratedCode } from 'llamautoma-types'
+import { getMessageString } from './lib'
 
 // Create coder with structured output
-const coder = createStructuredLLM(codeSchema)
+const coder = createStructuredLLM<GeneratedCode>(GeneratedCodeSchema)
 
 // Create the coder task
 export const coderTask = task(
@@ -70,9 +45,11 @@ Code:`
     )
 
     return {
-      ...code,
+      files: code.files,
+      dependencies: code.dependencies,
       approved: feedback?.approved ?? false,
       feedback: feedback?.feedback,
+      metadata: code.metadata,
     }
   }
 )

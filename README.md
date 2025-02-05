@@ -9,7 +9,7 @@ A powerful, TypeScript-based AI agent framework built on top of LangChain for au
 ## ✨ Features
 
 - 🚀 High-performance TypeScript execution engine
-- 🔄 Real-time code generation and editing
+- 🔄 Real-time code generation and editing via chat
 - 🧠 Advanced AI agent system with ReAct framework
 - 🔒 Built-in safety controls and validation
 - 📝 Streaming responses for real-time feedback
@@ -38,7 +38,7 @@ bun run start
 
 ## 🔌 API Reference
 
-The server exposes several HTTP endpoints for different code-related operations. All endpoints accept POST requests and expect JSON payloads.
+The server exposes HTTP endpoints for chat and workspace synchronization. All endpoints accept POST requests and expect JSON payloads.
 
 ### Base URL
 ```
@@ -76,14 +76,14 @@ The specific content of each event varies by endpoint but follows this general s
 ### 1. Chat Endpoint
 `POST /v1/chat`
 
-Interactive chat endpoint with streaming responses.
+Interactive chat endpoint with streaming responses. Handles all code operations through natural language.
 
 ```typescript
 {
   "messages": [
     {
       "role": "user",
-      "content": "How do I implement a binary search tree in TypeScript?"
+      "content": "Create a React component for a user profile"
     }
   ],
   "threadId": "optional-thread-id",
@@ -98,65 +98,7 @@ Response: Server-Sent Events (SSE) stream with the following events:
 - `content`: Main response content
 - `end`: Response completion
 
-### 2. Edit Endpoint
-`POST /v1/edit`
-
-Code editing and modification endpoint with real-time updates.
-
-```typescript
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "Add error handling to this function"
-    }
-  ],
-  "threadId": "optional-thread-id"
-}
-```
-
-Response:
-```typescript
-{
-  "edits": [
-    {
-      "file": "path/to/file.ts",
-      "content": "// Modified code content"
-    }
-  ]
-}
-```
-
-### 3. Compose Endpoint
-`POST /v1/compose`
-
-Generate new code files and components with progress updates.
-
-```typescript
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "Create a React component for a user profile"
-    }
-  ],
-  "threadId": "optional-thread-id"
-}
-```
-
-Response:
-```typescript
-{
-  "files": [
-    {
-      "path": "components/UserProfile.tsx",
-      "content": "// Generated component code"
-    }
-  ]
-}
-```
-
-### 4. Sync Endpoint
+### 2. Sync Endpoint
 `POST /v1/sync`
 
 Synchronize and analyze codebase structure with progress updates.
@@ -164,16 +106,11 @@ Synchronize and analyze codebase structure with progress updates.
 ```typescript
 {
   "root": "/path/to/project",
-  "excludePatterns": ["node_modules", "dist"]
+  "excludePatterns": ["node_modules", "dist", ".git"]
 }
 ```
 
-Response:
-```typescript
-{
-  "status": "success"
-}
-```
+Response: Server-Sent Events (SSE) stream with file content and status updates.
 
 ## 🔒 Safety Features
 

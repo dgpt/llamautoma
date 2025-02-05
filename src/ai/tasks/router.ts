@@ -1,107 +1,205 @@
-import { z } from 'zod'
-import { BaseMessage } from '@langchain/core/messages'
+import { BaseMessage, HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages'
 import { entrypoint, task } from '@langchain/langgraph'
-import { MemorySaver } from '@langchain/langgraph-checkpoint'
-import { llm } from '../llm'
+import { RunnableConfig } from '@langchain/core/runnables'
 import { plannerTask } from './planner'
 import { reviewerTask } from './reviewer'
 import { coderTask } from './coder'
-import { diffTask } from './diff'
 import { summarizerTask } from './summarizer'
 import { logger } from '@/logger'
+import type { Message, WorkflowState, BaseResponse } from 'llamautoma-types'
+import { DiffTool } from '../tools/diff'
+import { SearchTool } from '../tools/search'
+import { ExtractTool } from '../tools/extract'
+import { RunTool } from '../tools/run'
+import { llm } from '../llm'
 
-// Schema for workflow output
-export const workflowOutputSchema = z.object({
-  messages: z.array(z.any()),
-  threadId: z.string(),
-  checkpoint: z.string(),
-  status: z.enum(['success', 'error', 'in_progress']),
-  toolFeedback: z.record(z.string(), z.any()).optional(),
-  iterations: z.number(),
+// Convert Message to BaseMessage
+function toBaseMessage(msg: Message): BaseMessage {
+  const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+  const additional = {
+    name: msg.name,
+    metadata: msg.metadata,
+  }
+
+  switch (msg.role.toLowerCase()) {
+    case 'system':
+      return new SystemMessage({ content, ...additional })
+    case 'assistant':
+      return new AIMessage({ content, ...additional })
+    default:
+      return new HumanMessage({ content, ...additional })
+  }
+}
+
+// Convert BaseMessage to Message
+function toMessage(msg: BaseMessage): Message {
+  const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+  return {
+    role: msg instanceof SystemMessage ? 'system' : msg instanceof AIMessage ? 'assistant' : 'user',
+    content,
+    name: msg.name,
+    metadata: msg.additional_kwargs,
+  }
+}
+
+// Initialize tools and bind them to LLM
+const config: Partial<RunnableConfig> = {
+  runName: 'llamautoma_tool',
+  callbacks: undefined,
+  metadata: { llm },
+  tags: ['llamautoma'],
+}
+
+// Initialize and bind all tools
+const tools = {
+  diff: new DiffTool().bind(config),
+  search: new SearchTool().bind(config),
+  extract: new ExtractTool().bind(config),
+  run: new RunTool().bind(config),
+}
+
+// Register tools with LLM
+llm.bind({
+  ...config,
+  tools: Object.values(tools),
 })
 
-export type WorkflowOutput = z.infer<typeof workflowOutputSchema>
+// Create workflow tasks
+const summarizeContext = task('summarizeContext', async (messages: Message[]) => {
+  if (messages.length <= 10) return { messages }
+  const baseMessages = messages.map(toBaseMessage)
+  const summary = await summarizerTask({ messages: baseMessages })
+  return { messages: Array.from(summary.messages).map(msg => toMessage(msg)) }
+})
 
-// Create the workflow
+// Create workflow
 export const workflow = entrypoint(
-  { checkpointer: new MemorySaver(), name: 'llamautoma' },
-  async (inputs: {
-    messages: BaseMessage[]
-    threadId?: string
-    checkpoint?: string
-    maxIterations?: number
-  }) => {
-    const {
-      messages,
-      threadId = Bun.randomUUIDv7(),
-      checkpoint = 'llamautoma',
-      maxIterations = 10,
-    } = inputs
+  'llamautoma',
+  async (input: WorkflowState): Promise<BaseResponse> => {
+    // Initialize state
+    let messages = input.messages || []
     let iterations = 0
-    let currentMessages = messages
-    let status: WorkflowOutput['status'] = 'in_progress'
-    let toolFeedback: Record<string, any> = {}
 
     try {
-      // Step 1: Summarize if context is too long
-      if (currentMessages.length > 10) {
-        const summary = await summarizerTask({ messages: currentMessages })
-        currentMessages = summary.messages
-      }
+      // Summarize context if needed
+      const summary = await summarizeContext(messages)
+      messages = summary.messages
 
-      // Step 2: Plan generation and review loop
-      let plan = await plannerTask({ messages: currentMessages })
-      while (!plan.approved && iterations < maxIterations) {
-        const review = await reviewerTask({ messages: currentMessages, plan })
-        if (!review.approved) {
-          plan = await plannerTask({ messages: currentMessages, feedback: review.feedback })
-          iterations++
-        } else {
-          break
+      // Generate plan with tools context
+      const baseMessages = messages.map(toBaseMessage)
+      const plan = await plannerTask({
+        messages: baseMessages,
+        feedback: {
+          approved: false,
+          feedback: `Available tools: ${Object.keys(tools).join(', ')}`,
+        },
+      })
+
+      // If plan indicates we should just chat, return early
+      if (plan.type === 'chat') {
+        return {
+          status: 'success',
+          metadata: {
+            messages,
+            iterations,
+            threadId: input.id,
+            type: 'chat',
+          },
         }
       }
 
-      // Step 3: Code generation and review loop
-      let code = await coderTask({ messages: currentMessages, plan })
-      while (!code.approved && iterations < maxIterations) {
-        const review = await reviewerTask({ messages: currentMessages, code })
-        if (!review.approved) {
-          code = await coderTask({ messages: currentMessages, feedback: review.feedback })
-          iterations++
-        } else {
-          break
+      // Review plan with tools context
+      const planReview = await reviewerTask({
+        messages: baseMessages,
+        plan,
+      })
+      if (!planReview.approved) {
+        return {
+          status: 'error',
+          error: planReview.feedback,
+          metadata: {
+            messages,
+            iterations,
+            threadId: input.id,
+          },
         }
       }
 
-      // Step 4: Generate diff
-      const diff = await diffTask({ messages: currentMessages, code })
+      // Generate code with tools context
+      const code = await coderTask({
+        messages: baseMessages,
+        plan,
+        feedback: {
+          approved: false,
+          feedback: `Available tools: ${Object.keys(tools).join(', ')}`,
+        },
+      })
 
-      status = 'success'
-      toolFeedback = {
-        plan: plan.feedback,
-        code: code.feedback,
-        diff: diff.feedback,
+      // Review code with tools context
+      const codeReview = await reviewerTask({
+        messages: baseMessages,
+        code,
+      })
+      if (!codeReview.approved) {
+        return {
+          status: 'error',
+          error: codeReview.feedback,
+          metadata: {
+            messages,
+            iterations,
+            threadId: input.id,
+          },
+        }
       }
 
+      // Generate diffs using diff tool
+      const diffs = await tools.diff.invoke({ files: code.files })
+
+      // Return success
       return {
-        messages: currentMessages,
-        threadId,
-        checkpoint,
-        status,
-        toolFeedback,
-        iterations,
+        status: 'success',
+        metadata: {
+          messages,
+          iterations,
+          threadId: input.id,
+          diffs,
+          type: 'code',
+        },
       }
     } catch (error) {
-      logger.error('Workflow failed', { error })
-      status = 'error'
+      logger.error('Workflow error:', error)
       return {
-        messages: currentMessages,
-        threadId,
-        checkpoint,
-        status,
-        toolFeedback,
-        iterations,
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error),
+        metadata: {
+          messages,
+          iterations,
+          threadId: input.id,
+        },
       }
     }
   }
 )
+
+// Export workflow
+export const llamautoma = {
+  workflow,
+  invoke: async (input: WorkflowState): Promise<BaseResponse> => {
+    return await workflow.invoke(input, {
+      configurable: {
+        thread_id: input.id,
+      },
+    })
+  },
+  stream: async function* (input: WorkflowState) {
+    const stream = await workflow.stream(input, {
+      configurable: {
+        thread_id: input.id,
+      },
+    })
+
+    for await (const chunk of stream) {
+      yield chunk
+    }
+  },
+}

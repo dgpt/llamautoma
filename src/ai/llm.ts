@@ -18,6 +18,6 @@ export const llm = new ChatOllama({
 })
 
 // Create LLM with structured output
-export function createStructuredLLM<T extends z.ZodType>(schema: T) {
+export function createStructuredLLM<T>(schema: z.ZodType<T>) {
   return llm.withStructuredOutput(schema)
 }

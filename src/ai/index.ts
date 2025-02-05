@@ -1,51 +1,58 @@
-import { BaseMessage } from '@langchain/core/messages'
-import { workflow, WorkflowOutput } from './tasks/router'
-import { planSchema } from './tasks/planner'
-import { codeSchema } from './tasks/coder'
-import { reviewSchema } from './tasks/reviewer'
-import { diffSchema } from './tasks/diff'
-import { searchSchema, extractionSchema } from './tasks/search'
-import { feedbackSchema } from './llm'
+import { workflow } from './tasks/router'
+import type {
+  WorkflowState,
+  BaseResponse,
+  PlanSchema,
+  GeneratedCodeSchema,
+  ReviewSchema,
+  FeedbackSchema,
+} from 'llamautoma-types'
 
 // Re-export all schemas
 export {
-  planSchema,
-  codeSchema,
-  reviewSchema,
-  diffSchema,
-  searchSchema,
-  extractionSchema,
-  feedbackSchema,
+  PlanSchema as planSchema,
+  GeneratedCodeSchema as codeSchema,
+  ReviewSchema as reviewSchema,
+  FeedbackSchema as feedbackSchema,
 }
 
 // Export workflow types
-export interface WorkflowInput {
-  messages: BaseMessage[]
+export interface WorkflowInput extends Omit<WorkflowState, 'id'> {
   threadId?: string
   checkpoint?: string
   maxIterations?: number
 }
 
-export type { WorkflowOutput }
-
 // Export the workflow
 export const llamautoma = {
   workflow,
-  invoke: async (input: WorkflowInput): Promise<WorkflowOutput> => {
-    return await workflow.invoke(input, {
-      configurable: {
-        thread_id: input.threadId,
-        checkpoint_ns: input.checkpoint,
+  invoke: async (input: WorkflowInput): Promise<BaseResponse> => {
+    return await workflow.invoke(
+      {
+        ...input,
+        id: input.threadId || crypto.randomUUID(),
       },
-    })
+      {
+        configurable: {
+          thread_id: input.threadId,
+          checkpoint_ns: input.checkpoint,
+        },
+      }
+    )
   },
   stream: async function* (input: WorkflowInput) {
-    const stream = await workflow.stream(input, {
-      configurable: {
-        thread_id: input.threadId,
-        checkpoint_ns: input.checkpoint,
+    const stream = await workflow.stream(
+      {
+        ...input,
+        id: input.threadId || crypto.randomUUID(),
       },
-    })
+      {
+        configurable: {
+          thread_id: input.threadId,
+          checkpoint_ns: input.checkpoint,
+        },
+      }
+    )
 
     for await (const chunk of stream) {
       yield chunk

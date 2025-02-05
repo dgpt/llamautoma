@@ -1,16 +1,13 @@
-import { z } from 'zod'
 import { BaseMessage, AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
 import { llm } from '../llm'
-import { getMessageString } from './utils'
+import { getMessageString } from './lib'
 
 // Schema for summarizer output
-export const summarizerSchema = z.object({
-  messages: z.array(z.any()),
-  summary: z.string(),
-})
-
-export type SummarizerOutput = z.infer<typeof summarizerSchema>
+export interface SummarizerOutput {
+  messages: BaseMessage[]
+  summary: string
+}
 
 // Create the summarizer task
 export const summarizerTask = task(

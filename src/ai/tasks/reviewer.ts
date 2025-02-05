@@ -1,23 +1,12 @@
-import { z } from 'zod'
 import { BaseMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
 import { createStructuredLLM } from '../llm'
-import { getMessageString } from './utils'
-import type { Plan } from './planner'
-import type { GeneratedCode } from './coder'
-
-// Schema for review output
-export const reviewSchema = z.object({
-  approved: z.boolean(),
-  feedback: z.string(),
-  suggestions: z.array(z.string()),
-  safety_concerns: z.array(z.string()).optional(),
-})
-
-export type Review = z.infer<typeof reviewSchema>
+import { ReviewSchema } from 'llamautoma-types'
+import type { Plan, GeneratedCode, Review } from 'llamautoma-types'
+import { getMessageString } from './lib'
 
 // Create reviewer with structured output
-const reviewer = createStructuredLLM(reviewSchema)
+const reviewer = createStructuredLLM<Review>(ReviewSchema)
 
 // Create the reviewer task
 export const reviewerTask = task(
@@ -75,6 +64,12 @@ Review:`
     }
 
     // Generate review using structured LLM
-    return await reviewer.invoke(reviewPrompt)
+    const result = await reviewer.invoke(reviewPrompt)
+    return {
+      approved: result.approved,
+      feedback: result.feedback,
+      suggestions: result.suggestions,
+      metadata: result.metadata,
+    }
   }
 )
