@@ -1,7 +1,6 @@
 import { expect, test, describe, beforeEach } from 'bun:test'
 import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages'
 import { entrypoint } from '@langchain/langgraph'
-import { RunnableConfig } from '@langchain/core/runnables'
 import { createTestContext, waitForResponse, type TestContext } from '../utils'
 import { reviewerTask } from '@/ai/tasks/reviewer'
 import { ReviewSchema, type Review, type Plan, type GeneratedCode } from 'llamautoma-types'
@@ -19,7 +18,7 @@ describe('Reviewer Task Tests', () => {
         checkpointer: ctx.memorySaver,
         name: 'reviewer_test',
       },
-      async (messages: BaseMessage[], config: RunnableConfig) => {
+      async (messages: BaseMessage[]) => {
         const plan: Plan = {
           response: 'Create a React counter component',
           steps: [
@@ -49,13 +48,6 @@ describe('Reviewer Task Tests', () => {
         const result = await reviewerTask({
           messages,
           plan,
-          config: {
-            ...config,
-            configurable: {
-              thread_id: ctx.threadId,
-              checkpoint_ns: 'reviewer_test',
-            },
-          },
         })
         console.log(`Reviewer result: ${JSON.stringify(result)}`)
         return result
@@ -117,7 +109,7 @@ describe('Reviewer Task Tests', () => {
         checkpointer: ctx.memorySaver,
         name: 'reviewer_test',
       },
-      async (messages: BaseMessage[], config: RunnableConfig) => {
+      async (messages: BaseMessage[]) => {
         const code: GeneratedCode = {
           files: [
             {
@@ -143,19 +135,14 @@ export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
     </div>
   );
 };`,
+              type: 'create',
+              description: 'React counter component with TypeScript support',
             },
           ],
         }
         const result = await reviewerTask({
           messages,
           code,
-          config: {
-            ...config,
-            configurable: {
-              thread_id: ctx.threadId,
-              checkpoint_ns: 'reviewer_test',
-            },
-          },
         })
         return result
       }
@@ -186,7 +173,7 @@ export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
         checkpointer: ctx.memorySaver,
         name: 'reviewer_test',
       },
-      async (messages: BaseMessage[], config: RunnableConfig) => {
+      async (messages: BaseMessage[]) => {
         const code: GeneratedCode = {
           files: [
             {
@@ -208,19 +195,14 @@ export const Counter = () => {
     </div>
   );
 };`,
+              type: 'create',
+              description: 'React counter component with incorrect state management',
             },
           ],
         }
         const result = await reviewerTask({
           messages,
           code,
-          config: {
-            ...config,
-            configurable: {
-              thread_id: ctx.threadId,
-              checkpoint_ns: 'reviewer_test',
-            },
-          },
         })
         return result
       }

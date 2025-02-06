@@ -100,7 +100,6 @@ src/ai
   index.ts <- entrypoint, custom react agent implementation
   llm.ts <- ChatOllama model
   tasks/ <- langgraph task definitions
-    - router.ts <- handles orchestration and routing
     - coder.ts <- generates code based on user's prompt. Generates all code required to fulfill user's request.
     - reviewer.ts <- reviews the code to ensure it fulfill's the user's request
     - planner.ts <- interprets user's request and writes a plan for the code

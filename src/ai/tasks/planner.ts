@@ -1,9 +1,10 @@
 import { BaseMessage, SystemMessage } from '@langchain/core/messages'
 import { createStructuredLLM } from '../llm'
 import { PlanSchema } from 'llamautoma-types'
-import type { Feedback, Plan } from 'llamautoma-types'
+import type { Review, Plan } from 'llamautoma-types'
 import { getMessageString } from './lib'
 import { StructuredOutputParser } from '@langchain/core/output_parsers'
+import { logger } from '@/logger'
 
 // Create planner with structured output
 const planner = createStructuredLLM<Plan>(PlanSchema)
@@ -11,15 +12,20 @@ const planner = createStructuredLLM<Plan>(PlanSchema)
 // Create the planner task
 export const plannerTask = async ({
   messages,
-  feedback,
+  review,
 }: {
   messages: BaseMessage[]
-  feedback?: Feedback
+  review?: Review
 }): Promise<Plan> => {
   // Combine messages into context
   const context = messages.map(msg => getMessageString(msg)).join('\n')
   const parser = StructuredOutputParser.fromZodSchema(PlanSchema)
   const formatInstructions = parser.getFormatInstructions()
+
+  logger.debug(`Planner invoked with messages: ${context}`)
+  if (review) {
+    logger.debug(`Previous review: ${JSON.stringify(review)}`)
+  }
 
   // Generate plan using structured LLM
   const result = await planner.invoke([
@@ -27,7 +33,7 @@ export const plannerTask = async ({
     new SystemMessage(
       `You are a code planning assistant. Your job is to break down code tasks into clear, actionable steps.
 
-${feedback ? `Previous feedback: ${feedback.feedback}\n` : ''}
+${review ? `Previous review feedback: ${review.feedback}\n${review.suggestions?.map(s => `- ${s.step}: ${s.action}`).join('\n')}\n` : ''}
 Conversation:
 ${context}
 
@@ -53,6 +59,7 @@ Example format:
     ),
   ])
 
+  logger.debug(`Planner response: ${JSON.stringify(result)}`)
   return {
     response: result.response,
     steps: result.steps,

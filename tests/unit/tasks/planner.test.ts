@@ -24,7 +24,7 @@ describe('Planner Task Tests', () => {
     expect(result.steps!.length).toBeGreaterThan(0)
   })
 
-  test('should incorporate feedback into plan', async () => {
+  test('should incorporate review feedback into plan', async () => {
     const messages = [
       new SystemMessage('You are a code generation assistant.'),
       new HumanMessage('Create a user registration form'),
@@ -32,9 +32,19 @@ describe('Planner Task Tests', () => {
 
     const result = await runWithTestConfig<Plan>(plannerTask, {
       messages,
-      feedback: {
+      review: {
         approved: false,
         feedback: 'Add password validation and error handling',
+        suggestions: [
+          {
+            step: 'Add password validation',
+            action: 'Implement password strength requirements and validation',
+          },
+          {
+            step: 'Add error handling',
+            action: 'Add proper error handling for form submission and validation',
+          },
+        ],
       },
     })
 
