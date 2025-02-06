@@ -3,7 +3,7 @@ import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messag
 import { entrypoint } from '@langchain/langgraph'
 import { createTestContext, waitForResponse, type TestContext } from '../utils'
 import { plannerTask } from '@/ai/tasks/planner'
-import { PlanSchema, type Plan, type Review } from 'llamautoma-types'
+import { PlanSchema, type Plan } from 'llamautoma-types'
 
 describe('Planner Task Tests', () => {
   let ctx: TestContext

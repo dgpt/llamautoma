@@ -1,61 +1,78 @@
-import { BaseMessage, AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
-import { task } from '@langchain/langgraph'
-import { createStructuredLLM } from '../llm'
-import { SummarySchema } from 'llamautoma-types'
-import type { Summary } from 'llamautoma-types'
-import { getMessageString } from './lib'
+import { BaseMessage, SystemMessage, AIMessage } from '@langchain/core/messages'
+import { llm } from '../llm'
 import { logger } from '@/logger'
 
-// Create summarizer with structured output
-const summarizer = createStructuredLLM<Summary>(SummarySchema)
+export interface SummarizerResult {
+  messages: BaseMessage[]
+  summary: string
+}
 
-// Create the summarizer task
-export const summarizerTask = task(
-  'summarizer',
-  async ({ messages }: { messages: BaseMessage[] }): Promise<Summary> => {
-    // Combine all messages into a single context
-    const context = messages
-      .map(msg => {
-        if (msg instanceof SystemMessage) return `System: ${getMessageString(msg)}`
-        if (msg instanceof HumanMessage) return `Human: ${getMessageString(msg)}`
-        if (msg instanceof AIMessage) return `Assistant: ${getMessageString(msg)}`
-        return `${msg.constructor.name}: ${getMessageString(msg)}`
-      })
-      .join('\n')
+/**
+ * Safely gets the string content from a message
+ */
+function getMessageString(msg: BaseMessage): string {
+  const content = msg.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content))
+    return content.map(c => (typeof c === 'string' ? c : JSON.stringify(c))).join(' ')
+  return JSON.stringify(content)
+}
 
-    logger.debug(`Summarizing ${messages.length} messages`)
+export const summarizerTask = async ({
+  messages,
+  maxContextTokens,
+}: {
+  messages: BaseMessage[]
+  maxContextTokens: number
+}): Promise<SummarizerResult> => {
+  // Separate system messages from other messages
+  const systemMessages = messages.filter(msg => msg instanceof SystemMessage)
+  const nonSystemMessages = messages.filter(msg => !(msg instanceof SystemMessage))
 
-    // Generate summary using structured LLM
-    const result = await summarizer.invoke([
-      new SystemMessage(
-        `You are a conversation summarizer. Your job is to condense long conversations while preserving key technical details and requirements.
+  // Get token count for non-system messages
+  const tokenCounts = await Promise.all(
+    nonSystemMessages.map(msg => llm.getNumTokens(getMessageString(msg)))
+  )
+  const totalTokens = tokenCounts.reduce((sum, count) => sum + count, 0)
 
-Requirements:
-1. Preserve all technical requirements and specifications
-2. Keep important context and decisions
-3. Remove redundant or unnecessary details
-4. Focus on the most recent and relevant information
-5. Maintain clear and concise language
-
-The summary MUST be significantly shorter than the original conversation.
-The summary should focus on the most recent and relevant technical details.
-Ensure the summary maintains all key requirements and decisions.
-
-Conversation to summarize:
-${context}
-`
-      ),
-    ])
-
-    logger.debug(`Generated summary: ${result.summary}`)
-
-    // Return summarized context
+  // If under token limit, return as is
+  if (totalTokens <= maxContextTokens) {
     return {
-      messages: [
-        messages[0], // Keep system message
-        new AIMessage({ content: result.summary }),
-      ],
-      summary: result.summary,
+      messages: messages,
+      summary: '',
     }
   }
-)
+
+  logger.debug('Summarizing messages due to token limit:', {
+    totalTokens,
+    maxContextTokens,
+    messageCount: nonSystemMessages.length,
+  })
+
+  // Format messages for summarization
+  const messageText = nonSystemMessages
+    .map(msg => `${msg instanceof AIMessage ? 'Assistant' : 'User'}: ${getMessageString(msg)}`)
+    .join('\n\n')
+
+  // Get summary from LLM
+  const result = await llm.invoke([
+    new SystemMessage({
+      content: `You are a conversation summarizer. Your task is to create a concise but comprehensive summary of the conversation below.
+Focus on key points, decisions, and important context that would be needed to continue the conversation.
+The summary should be detailed enough that someone reading it would understand the full context and be able to continue the conversation appropriately.`,
+    }),
+    new SystemMessage({
+      content: `Conversation to summarize:
+
+${messageText}`,
+    }),
+  ])
+
+  const summaryContent = getMessageString(result)
+
+  // Return system messages plus summary
+  return {
+    messages: [...systemMessages, new AIMessage({ content: summaryContent })],
+    summary: summaryContent,
+  }
+}

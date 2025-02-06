@@ -1,5 +1,5 @@
 import { BaseMessage, HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages'
-import { entrypoint, task, MemorySaver } from '@langchain/langgraph'
+import { entrypoint, MemorySaver } from '@langchain/langgraph'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { plannerTask } from './tasks/planner'
 import { reviewerTask } from './tasks/reviewer'
@@ -65,14 +65,6 @@ llm.bind({
   tools: Object.values(tools),
 })
 
-// Create workflow tasks
-const summarizeContext = task('summarizeContext', async (messages: Message[]) => {
-  if (messages.length <= 10) return { messages }
-  const baseMessages = messages.map(toBaseMessage)
-  const summary = await summarizerTask({ messages: baseMessages })
-  return { messages: Array.from(summary.messages).map(msg => toMessage(msg)) }
-})
-
 // Create workflow
 export const workflow = entrypoint(
   {
@@ -82,91 +74,87 @@ export const workflow = entrypoint(
   async (input: WorkflowState): Promise<BaseResponse> => {
     // Initialize state
     let messages = input.messages || []
-    let iterations = 0
-    const maxIterations = DEFAULT_CONFIG.maxIterations
+    let planIterations = 0
+    let codeIterations = 0
+    const maxIterations = input.config?.maxIterations || DEFAULT_CONFIG.maxIterations
+    const maxContextTokens =
+      input.config?.memory?.maxContextTokens || DEFAULT_CONFIG.memory.maxContextTokens
 
     try {
-      // Check iterations
-      if (iterations >= maxIterations) {
-        return {
-          status: 'error',
-          error: `Max iterations (${maxIterations}) reached`,
-          metadata: {
-            messages,
-            iterations,
-            threadId: input.id,
-          },
-        }
-      }
+      // Convert messages to base messages
+      let baseMessages = messages.map(toBaseMessage)
 
       // Summarize context if needed
-      const summary = await summarizeContext(messages)
-      messages = summary.messages
+      const summary = await summarizerTask({ messages: baseMessages, maxContextTokens })
+      baseMessages = summary.messages
+      messages = baseMessages.map(msg => toMessage(msg))
 
-      // Generate plan with tools context
-      const baseMessages = messages.map(toBaseMessage)
-      const plan = await plannerTask({
-        messages: baseMessages,
-        feedback: {
-          approved: false,
-          feedback: `Available tools: ${Object.keys(tools).join(', ')}`,
-        },
-      })
+      // Generate initial plan
+      let plan = await plannerTask({ messages: baseMessages })
 
-      // If plan doesn't have steps, it's just a chat response
-      if (!plan.steps?.length) {
-        return {
-          status: 'success',
-          metadata: {
-            messages,
-            iterations,
-            threadId: input.id,
-            response: plan.response,
+      // Plan review loop
+      let planReview
+      while (planIterations < maxIterations) {
+        // Review plan
+        planReview = await reviewerTask({
+          messages: baseMessages,
+          plan,
+        })
+
+        if (planReview.approved) break
+
+        // Generate new plan with review feedback
+        plan = await plannerTask({
+          messages: baseMessages,
+          review: {
+            approved: false,
+            feedback: planReview.feedback,
           },
+        })
+
+        planIterations++
+
+        // Auto-pass at max iterations
+        if (planIterations >= maxIterations) {
+          logger.warn('Max plan iterations reached, auto-passing plan')
+          break
         }
       }
 
-      // Review plan with tools context
-      const planReview = await reviewerTask({
+      // Code generation loop
+      let code = await coderTask({
         messages: baseMessages,
         plan,
       })
-      if (!planReview.approved) {
-        return {
-          status: 'error',
-          error: planReview.feedback || 'Plan review failed',
-          metadata: {
-            messages,
-            iterations,
-            threadId: input.id,
-          },
-        }
-      }
 
-      // Generate code with tools context
-      const code = await coderTask({
-        messages: baseMessages,
-        plan,
-        feedback: {
-          approved: false,
-          feedback: `Available tools: ${Object.keys(tools).join(', ')}`,
-        },
-      })
+      // Code review loop
+      let codeReview
+      while (codeIterations < maxIterations) {
+        // Review code
+        codeReview = await reviewerTask({
+          messages: baseMessages,
+          code,
+          plan,
+        })
 
-      // Review code with tools context
-      const codeReview = await reviewerTask({
-        messages: baseMessages,
-        code,
-      })
-      if (!codeReview.approved) {
-        return {
-          status: 'error',
-          error: codeReview.feedback || 'Code review failed',
-          metadata: {
-            messages,
-            iterations,
-            threadId: input.id,
+        if (codeReview.approved) break
+
+        // Generate new code with review feedback
+        code = await coderTask({
+          messages: baseMessages,
+          plan,
+          review: {
+            approved: false,
+            feedback: codeReview.feedback,
           },
+        })
+
+        codeIterations++
+
+        // Auto-pass at max iterations
+        if (codeIterations >= maxIterations) {
+          logger.warn('Max code iterations reached, auto-passing code')
+          break
         }
       }
 
@@ -178,10 +166,9 @@ export const workflow = entrypoint(
         status: 'success',
         metadata: {
           messages,
-          iterations,
           threadId: input.id,
           diffs,
-          type: 'code',
+          plan,
         },
       }
     } catch (error) {
@@ -191,7 +178,6 @@ export const workflow = entrypoint(
         error: error instanceof Error ? error.message : String(error),
         metadata: {
           messages,
-          iterations,
           threadId: input.id,
         },
       }
