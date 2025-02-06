@@ -1,8 +1,7 @@
 import { expect } from 'bun:test'
 import { ChatOllama } from '@langchain/ollama'
-import { MemorySaver } from '@langchain/langgraph-checkpoint'
+import { MemorySaver, entrypoint } from '@langchain/langgraph'
 import { RunnableConfig } from '@langchain/core/runnables'
-import { DEFAULT_AGENT_CONFIG } from '../../src/config'
 
 // Constants
 export const TEST_TIMEOUT = 60000 // 60 seconds for real model responses
@@ -76,6 +75,22 @@ export const validateStreamChunks = <T extends { status: string; metadata?: Reco
 
 // Helper to run tasks with test config
 export async function runWithTestConfig<T>(task: any, input: any): Promise<T> {
-  const fn = task.bind(null, input)
-  return await fn()
+  const ctx = createTestContext()
+  const workflow = entrypoint(
+    {
+      name: 'test',
+      checkpointer: ctx.memorySaver,
+    },
+    async () => {
+      const boundTask = task.bind({ config: testConfig })
+      return await boundTask({ messages: input })
+    }
+  )
+  const result = await workflow.invoke(null, {
+    configurable: {
+      thread_id: ctx.threadId,
+      checkpoint_ns: 'test',
+    },
+  })
+  return result as T
 }

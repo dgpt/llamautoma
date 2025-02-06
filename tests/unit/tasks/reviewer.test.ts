@@ -21,7 +21,7 @@ describe('Reviewer Task Tests', () => {
       },
       async (messages: BaseMessage[], config: RunnableConfig) => {
         const plan: Plan = {
-          type: 'code',
+          response: 'Create a React counter component',
           steps: [
             'Ensure Node.js and npm (or yarn) are installed on your system.',
             'Set up a new React project by running "npx create-react-app counter-app" or using Vite, and navigate into the project directory.',
@@ -84,46 +84,31 @@ describe('Reviewer Task Tests', () => {
   test('should reject a plan missing critical steps', async () => {
     const workflow = entrypoint(
       {
-        checkpointer: ctx.memorySaver,
         name: 'reviewer_test',
       },
-      async (messages: BaseMessage[], config: RunnableConfig) => {
+      async (messages: BaseMessage[]) => {
         const plan: Plan = {
-          type: 'code',
+          response: 'Create a styled React counter component',
           steps: ['Initialize new React project using create-react-app'],
         }
         const result = await reviewerTask({
           messages,
           plan,
-          config: {
-            ...config,
-            configurable: {
-              thread_id: ctx.threadId,
-              checkpoint_ns: 'reviewer_test',
-            },
-          },
         })
         return result
       }
     )
 
     const messages = [
-      new SystemMessage('You are a code reviewer. Review this plan.'),
       new HumanMessage('Create a styled React counter component with increment/decrement buttons'),
     ]
 
-    const result = await waitForResponse(
-      workflow.invoke(messages, {
-        configurable: {
-          thread_id: ctx.threadId,
-          checkpoint_ns: 'reviewer_test',
-        },
-      })
-    )
+    const result = await waitForResponse(workflow.invoke(messages))
     const review = result as Review
 
     expect(() => ReviewSchema.parse(review)).not.toThrow()
     expect(review.approved).toBe(false)
+    expect(review.feedback).toBeDefined()
   })
 
   test('should approve well-written code', async () => {
@@ -192,8 +177,7 @@ export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
     const review = result as Review
 
     expect(() => ReviewSchema.parse(review)).not.toThrow()
-    expect(review.approved).toBeDefined()
-    expect(review.feedback).toBeDefined()
+    expect(review.approved).toBe(true)
   })
 
   test('should reject code with potential issues', async () => {

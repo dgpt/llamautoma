@@ -1,18 +1,18 @@
 import { BaseMessage, AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
-import { llm } from '../llm'
+import { createStructuredLLM } from '../llm'
+import { SummarySchema } from 'llamautoma-types'
+import type { Summary } from 'llamautoma-types'
 import { getMessageString } from './lib'
+import { logger } from '@/logger'
 
-// Schema for summarizer output
-export interface SummarizerOutput {
-  messages: BaseMessage[]
-  summary: string
-}
+// Create summarizer with structured output
+const summarizer = createStructuredLLM<Summary>(SummarySchema)
 
 // Create the summarizer task
 export const summarizerTask = task(
   'summarizer',
-  async ({ messages }: { messages: BaseMessage[] }): Promise<SummarizerOutput> => {
+  async ({ messages }: { messages: BaseMessage[] }): Promise<Summary> => {
     // Combine all messages into a single context
     const context = messages
       .map(msg => {
@@ -23,24 +23,39 @@ export const summarizerTask = task(
       })
       .join('\n')
 
-    // Generate summary using LLM
-    const response = await llm.invoke(
-      `Summarize the following conversation while preserving key technical details and requirements:
+    logger.debug(`Summarizing ${messages.length} messages`)
 
+    // Generate summary using structured LLM
+    const result = await summarizer.invoke([
+      new SystemMessage(
+        `You are a conversation summarizer. Your job is to condense long conversations while preserving key technical details and requirements.
+
+Requirements:
+1. Preserve all technical requirements and specifications
+2. Keep important context and decisions
+3. Remove redundant or unnecessary details
+4. Focus on the most recent and relevant information
+5. Maintain clear and concise language
+
+The summary MUST be significantly shorter than the original conversation.
+The summary should focus on the most recent and relevant technical details.
+Ensure the summary maintains all key requirements and decisions.
+
+Conversation to summarize:
 ${context}
+`
+      ),
+    ])
 
-Summary:`
-    )
+    logger.debug(`Generated summary: ${result.summary}`)
 
-    const summaryText = getMessageString(response)
-
-    // Return summarized context as a single message
+    // Return summarized context
     return {
       messages: [
         messages[0], // Keep system message
-        new AIMessage({ content: summaryText }),
+        new AIMessage({ content: result.summary }),
       ],
-      summary: summaryText,
+      summary: result.summary,
     }
   }
 )

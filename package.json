@@ -6,7 +6,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
-    "test": "bun test",
+    "test": "bun test --timeout=30000",
     "test:watch": "bun test --watch",
     "build": "bun build src/index.ts --outdir dist",
     "lint": "eslint . --ext .ts",

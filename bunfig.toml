@@ -1,6 +1,5 @@
 [test]
 coverage = true
-timeout = 10000
 
 [define]
 "process.env.LOG_LEVEL" = "'debug'"

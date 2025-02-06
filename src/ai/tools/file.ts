@@ -5,14 +5,18 @@ import { logger } from '@/logger'
 import { FileOp } from 'llamautoma-types'
 
 // Schema for file request types
-const fileInputSchema = z.object({
-  requestType: z.enum(['file', 'files', 'directory', 'directories']),
-  paths: z.array(z.string()),
-  includePattern: z.string().optional(),
-  excludePattern: z.string().optional(),
+export const FileInputSchema = z.object({
+  requestType: z
+    .enum(['file', 'files', 'directory', 'directories'])
+    .describe(
+      'Do we need to look up a file, multiple files, a directory, or multiple directories?'
+    ),
+  paths: z.array(z.string()).describe('The paths to the files or directories we need to look up'),
+  includePattern: z.string().optional().describe('A pattern to include in the search'),
+  excludePattern: z.string().optional().describe('A pattern to exclude from the search'),
 })
 
-type FileRequest = z.infer<typeof fileInputSchema>
+export type FileRequest = z.infer<typeof FileInputSchema>
 
 // Schema for file chunk response
 const FileChunkResponseSchema = z.object({
@@ -47,10 +51,10 @@ export type FileResponse = {
   [path: string]: FileOp
 }
 
-export class FileTool extends StructuredTool<typeof fileInputSchema> {
+export class FileTool extends StructuredTool<typeof FileInputSchema> {
   name = 'file'
   description = 'Read files and directories from the workspace'
-  schema = fileInputSchema
+  schema = FileInputSchema
 
   async _call(input: FileRequest): Promise<string> {
     try {

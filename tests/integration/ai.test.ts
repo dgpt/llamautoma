@@ -1,12 +1,12 @@
 import { expect, test, describe, beforeEach } from 'bun:test'
-import { llamautoma } from '@/ai/tasks/router'
+import { llamautoma } from '@/ai'
 import type { Message, WorkflowState, BaseResponse } from 'llamautoma-types'
 import {
   createTestContext,
   waitForResponse,
   validateStreamChunks,
   type TestContext,
-} from '../utils'
+} from '../unit/utils'
 
 describe('Router Task Tests', () => {
   let ctx: TestContext
