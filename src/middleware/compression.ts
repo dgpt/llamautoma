@@ -1,12 +1,22 @@
 import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack'
+import { encode as base85Encode } from '@alttiri/base85'
 import { logger } from '@/logger'
+import { StreamEvent } from '@/types/stream'
 
 /**
- * Compresses data using MessagePack
+ * Compresses data using MessagePack + Base85
+ * Handles both generic data and StreamEvents
  */
-function compressMessage(data: any): Buffer {
+export function compressMessage(data: StreamEvent | any): Buffer {
   try {
-    return Buffer.from(msgpackEncode(data))
+    // First use MessagePack to serialize
+    const msgpacked = msgpackEncode(data)
+    // Then encode with Base85 for JSON safety if it's a StreamEvent
+    if ((data as StreamEvent).type) {
+      return Buffer.from(base85Encode(msgpacked))
+    }
+    // Otherwise just return MessagePack encoded buffer
+    return Buffer.from(msgpacked)
   } catch (error) {
     logger.error('Error compressing message:', error)
     throw new Error('Failed to compress message')
@@ -85,11 +95,12 @@ export function compressResponse(res: Response, acceptMsgPack: boolean): Respons
 }
 
 /**
- * Helper to compress SSE events
+ * Helper to compress SSE events with MessagePack
  */
 export function compressSSEEvent(event: string, data: any): string {
-  const compressed = compressMessage(data).toString('base64')
-  return `event: ${event}\ndata: msgpack:${compressed}\n\n`
+  const msgpacked = msgpackEncode(data)
+  const encoded = base85Encode(msgpacked)
+  return `event: ${event}\ndata: msgpack:${encoded}\n\n`
 }
 
 /**

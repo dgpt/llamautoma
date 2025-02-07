@@ -38,77 +38,50 @@ export const reviewerTask = task(
 
     // Generate review using LLM
     const response = await llm.invoke(
-      `Review the following ${type} based on the conversation context:
+      `Review the following ${type} to ensure it meets the requirements:
 
-      Context:
+      CONVERSATION CONTEXT:
       ${context}
 
       ${type.toUpperCase()} TO REVIEW:
       ${contentToReview}
 
       Respond with:
-      1. Whether you approve or not (be strict!)
+      1. Whether the ${type} is approved (yes/no)
       2. Detailed feedback if not approved
-      3. Specific suggestions for improvement if not approved
-         Format suggestions as: "- step: action"
+      3. Specific suggestions for improvement
 
-      Focus on:
-      ${
-        type === 'plan'
-          ? `
-      - Completeness (covers all requirements)
-      - Clarity (steps are clear and actionable)
-      - Dependencies (steps are in correct order)
-      - Feasibility (steps can be implemented)
-      `
-          : `
-      - Code quality and readability
-      - Error handling and edge cases
-      - Type safety and documentation
-      - Testing and maintainability
-      `
-      }
-      - User requirements (matches user's intent)
-
-      Keep the response clear and actionable.`
+      Keep the review thorough but concise.`
     )
 
-    // Parse review feedback
+    // Parse response
     const content =
       typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
     const [decision, feedback, ...suggestionLines] = content.split('\n\n')
-    const approved = decision.toLowerCase().includes('approve')
+
+    // Parse decision
+    const approved = decision.toLowerCase().includes('yes')
+
+    // Parse suggestions
     const suggestions = suggestionLines
-      .flatMap(line => line.split('\n'))
-      .filter(line => line.startsWith('-'))
+      .join('\n\n')
+      .split('\n')
+      .filter(line => line.trim())
       .map(line => {
-        const [step, action] = line.slice(2).split(': ')
+        const [step, action] = line.split(':').map(s => s.trim())
         return { step, action }
       })
-
-    // Send review decision to chat window
-    const responseMessage = approved
-      ? `✅ ${type.charAt(0).toUpperCase() + type.slice(1)} approved!`
-      : `❌ Changes needed for ${type}. See feedback for details.`
-    sendTaskResponse('reviewer', responseMessage)
-
-    // If not approved, send feedback
-    if (!approved && feedback) {
-      sendTaskResponse('reviewer', `\nFeedback:\n${feedback}`)
-      if (suggestions.length > 0) {
-        sendTaskResponse(
-          'reviewer',
-          `\nSuggestions:\n${suggestions.map(s => `- ${s.step}: ${s.action}`).join('\n')}`
-        )
-      }
-    }
 
     // Create structured response
     const result = ReviewerTaskSchema.parse({
       approved,
       feedback: feedback || undefined,
       suggestions: suggestions.length > 0 ? suggestions : undefined,
-      response: responseMessage,
+      response: {
+        content: approved ? 'Review passed ✓' : feedback,
+        type: approved ? 'success' : 'warning',
+        shouldDisplay: true,
+      },
     })
 
     // Update progress with completion

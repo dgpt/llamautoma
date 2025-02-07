@@ -9,14 +9,33 @@ import {
   CompleteEvent,
 } from '@/types/stream'
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base'
+import { encode as msgpackEncode } from '@msgpack/msgpack'
 
 /**
  * Stream handler for client-server communication
+ * Handles compression and event emission for all streaming responses
  */
 export class StreamHandler extends EventEmitter {
+  private currentStatus: string | null = null
+  private taskResponses: Map<string, Array<ResponseEvent>> = new Map()
+
   constructor() {
     super()
     this.setMaxListeners(100)
+  }
+
+  /**
+   * Compress and emit an event
+   */
+  private emitCompressed(event: StreamEvent) {
+    try {
+      const compressed = msgpackEncode(event)
+      this.emit('data', compressed)
+    } catch (error) {
+      logger.error('Failed to compress event:', error)
+      // Fallback to uncompressed if compression fails
+      this.emit('data', event)
+    }
   }
 
   /**
@@ -30,20 +49,34 @@ export class StreamHandler extends EventEmitter {
       metadata,
       timestamp: Date.now(),
     }
-    this.emit('data', JSON.stringify(event))
+
+    // Store response for task
+    if (!this.taskResponses.has(task)) {
+      this.taskResponses.set(task, [])
+    }
+    this.taskResponses.get(task)?.push(event)
+
+    // Compress and emit
+    this.emitCompressed(event)
   }
 
   /**
    * Update progress status (shown at bottom of chat)
    */
   updateProgress(task: string, status: string) {
+    // Only emit if status changed
+    if (status === this.currentStatus) return
+    this.currentStatus = status
+
     const event: ProgressEvent = {
       type: 'progress',
       task,
       status,
       timestamp: Date.now(),
     }
-    this.emit('data', JSON.stringify(event))
+
+    // Compress and emit
+    this.emitCompressed(event)
   }
 
   /**
@@ -56,7 +89,9 @@ export class StreamHandler extends EventEmitter {
       error: error instanceof Error ? error.message : error,
       timestamp: Date.now(),
     }
-    this.emit('data', JSON.stringify(event))
+
+    // Compress and emit
+    this.emitCompressed(event)
   }
 
   /**
@@ -67,41 +102,83 @@ export class StreamHandler extends EventEmitter {
       type: 'complete',
       task,
       final_status: finalStatus,
+      responses: Array.from(this.taskResponses.get(task) || []),
       timestamp: Date.now(),
     }
-    this.emit('data', JSON.stringify(event))
+
+    // Clear task responses
+    this.taskResponses.delete(task)
+    this.currentStatus = null
+
+    // Compress and emit
+    this.emitCompressed(event)
   }
 }
 
 // Export singleton instance
-export const stream = new StreamHandler()
+export const streamHandler = new StreamHandler()
 
 /**
- * Helper to update progress from tasks
+ * Helper function to emit stream events from tasks
+ */
+export function emitStreamEvent(event: StreamEvent, config?: RunnableConfig) {
+  if (config?.callbacks) {
+    const handlers = Array.isArray(config.callbacks) ? config.callbacks : [config.callbacks]
+
+    for (const callback of handlers) {
+      if (callback instanceof StreamHandler) {
+        callback.emit('data', msgpackEncode(event))
+      }
+    }
+  }
+}
+
+/**
+ * Updates the progress status in the chat window
  */
 export function updateProgress(task: string, status: string, config?: RunnableConfig) {
-  stream.updateProgress(task, status)
+  streamHandler.updateProgress(task, status)
+  emitStreamEvent(
+    {
+      type: 'progress',
+      task,
+      status,
+      timestamp: Date.now(),
+    },
+    config
+  )
 }
 
 /**
- * Helper to send response from tasks
+ * Sends a task response to be displayed in the chat window
  */
-export function sendTaskResponse(task: string, content: string, metadata?: Record<string, any>) {
-  stream.sendResponse(task, content, metadata)
+export function sendTaskResponse(task: string, content: string, config?: RunnableConfig) {
+  streamHandler.sendResponse(task, content)
+  emitStreamEvent(
+    {
+      type: 'response',
+      task,
+      content,
+      timestamp: Date.now(),
+    },
+    config
+  )
 }
 
 /**
- * Helper to send error from tasks
+ * Sends a task completion event
  */
-export function sendTaskError(task: string, error: string | Error) {
-  stream.sendError(task, error)
-}
-
-/**
- * Helper to send completion from tasks
- */
-export function sendTaskComplete(task: string, finalStatus?: string) {
-  stream.sendComplete(task, finalStatus)
+export function sendTaskComplete(task: string, finalStatus?: string, config?: RunnableConfig) {
+  streamHandler.sendComplete(task, finalStatus)
+  emitStreamEvent(
+    {
+      type: 'complete',
+      task,
+      final_status: finalStatus,
+      timestamp: Date.now(),
+    },
+    config
+  )
 }
 
 /**
@@ -156,70 +233,4 @@ export async function waitForClientResponse<T>(): Promise<T | null> {
 
     stream.once('data', onResponse)
   })
-}
-
-/**
- * Helper function to emit stream events from tasks
- */
-function emitStreamEvent(event: StreamEvent, config?: RunnableConfig) {
-  if (config?.callbacks) {
-    const handlers = Array.isArray(config.callbacks)
-      ? config.callbacks
-      : config.callbacks.handlers || []
-
-    const eventText = JSON.stringify(event)
-    for (const handler of handlers) {
-      if (handler instanceof BaseCallbackHandler && handler.handleLLMNewToken) {
-        handler.handleLLMNewToken(
-          eventText,
-          { prompt: 0, completion: 1 },
-          config.runName || 'default',
-          undefined,
-          ['stream']
-        )
-      }
-    }
-  }
-}
-
-/**
- * Emits a response that should be appended to the conversation
- */
-export function emitResponse(task: string, content: string, config?: RunnableConfig) {
-  emitStreamEvent(
-    {
-      type: 'response',
-      task,
-      content,
-    },
-    config
-  )
-}
-
-/**
- * Emits an error message
- */
-export function emitError(task: string, error: string, config?: RunnableConfig) {
-  emitStreamEvent(
-    {
-      type: 'error',
-      task,
-      error,
-    },
-    config
-  )
-}
-
-/**
- * Signals task completion, optionally with a final status message
- */
-export function emitComplete(task: string, config?: RunnableConfig, final_status?: string) {
-  emitStreamEvent(
-    {
-      type: 'complete',
-      task,
-      final_status,
-    },
-    config
-  )
 }

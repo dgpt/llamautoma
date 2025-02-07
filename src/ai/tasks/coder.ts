@@ -2,12 +2,56 @@ import { task } from '@langchain/langgraph'
 import { BaseMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { CoderTaskSchema, ReviewerTaskSchema } from './schemas/tasks'
-import { FileSchema } from '../tools/schemas/file'
 import { z } from 'zod'
 import { llm } from '../llm'
 import { getMessageString } from '../tasks/lib'
 import { updateProgress, sendTaskResponse, sendTaskComplete } from '../utils/stream'
 import { parseSections } from '../lib/parse'
+
+/**
+ * Parses file sections into structured format
+ */
+function parseFiles(sections: string[]): Array<{
+  path: string
+  content: string
+  type: 'create' | 'modify' | 'delete'
+  description?: string
+}> {
+  const files = []
+  let currentFile: {
+    path: string
+    content: string
+    type: 'create' | 'modify' | 'delete'
+    description?: string
+  } | null = null
+
+  for (const section of sections) {
+    if (section.startsWith('File:') || section.startsWith('Path:')) {
+      if (currentFile) {
+        files.push(currentFile)
+      }
+      const [pathLine, ...contentLines] = section.split('\n')
+      const path = pathLine.split(':')[1].trim()
+      currentFile = {
+        path,
+        content: '',
+        type: 'create',
+      }
+    } else if (section.startsWith('Description:')) {
+      if (currentFile) {
+        currentFile.description = section.split(':')[1].trim()
+      }
+    } else if (currentFile) {
+      currentFile.content = section
+    }
+  }
+
+  if (currentFile) {
+    files.push(currentFile)
+  }
+
+  return files
+}
 
 /**
  * Generates code based on the plan and user requirements
@@ -71,72 +115,27 @@ export const coderTask = task(
       Keep the implementation clean and efficient.`
     )
 
-    // Parse response sections
+    // Parse response into sections
     const content =
       typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
-    const [explanation, ...sections] = parseSections(content)
+    const sections = parseSections(content)
+    const [explanation, ...fileSections] = sections
 
-    // Send explanation to chat window
-    sendTaskResponse('coder', explanation)
-
-    // Parse file sections
-    const files = []
-    let currentFile = null
-
-    for (const section of sections) {
-      if (section.startsWith('File:') || section.startsWith('Path:')) {
-        // Start new file
-        if (currentFile) {
-          files.push(currentFile)
-          // Send file info to chat window
-          sendTaskResponse(
-            'coder',
-            `\nCreating file: ${currentFile.path}\n${currentFile.description || ''}`
-          )
-        }
-        const [pathLine, ...contentLines] = section.split('\n')
-        const path = pathLine.split(':')[1].trim()
-        currentFile = {
-          path,
-          content: '',
-          type: 'create' as const,
-          description: '',
-        }
-      } else if (section.startsWith('Description:')) {
-        // Add description to current file
-        if (currentFile) {
-          currentFile.description = section.split(':')[1].trim()
-        }
-      } else if (currentFile) {
-        // Add content to current file
-        currentFile.content = section
-      }
-    }
-
-    // Add last file
-    if (currentFile) {
-      files.push(currentFile)
-      // Send last file info to chat window
-      sendTaskResponse(
-        'coder',
-        `\nCreating file: ${currentFile.path}\n${currentFile.description || ''}`
-      )
-    }
-
-    // Validate files
-    const validatedFiles = files.map(file => FileSchema.parse(file))
+    // Parse file sections into structured format
+    const files = parseFiles(fileSections)
 
     // Create structured response
     const result = CoderTaskSchema.parse({
-      files: validatedFiles,
-      explanation,
-      response: `Generated ${validatedFiles.length} file(s):\n${validatedFiles
-        .map(f => `- ${f.path}`)
-        .join('\n')}`,
+      files,
+      response: {
+        content: explanation,
+        type: 'info',
+        shouldDisplay: true,
+      },
     })
 
     // Update progress with completion
-    sendTaskComplete('coder', `Generated ${validatedFiles.length} file(s)`)
+    sendTaskComplete('coder', `Generated ${files.length} file(s)`)
 
     return result
   }

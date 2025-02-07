@@ -3,22 +3,31 @@ import { BaseMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { PlannerTaskSchema } from './schemas/tasks'
 import { llm } from '../llm'
-import { getMessageString } from '../tasks/lib'
-import { updateProgress, sendTaskResponse, sendTaskComplete } from '../utils/stream'
+import { getMessageString } from './lib'
+import { updateProgress, sendTaskResponse } from '../utils/stream'
 
 /**
  * Creates a plan for code generation based on user request
  */
-export const plannerTask = task('planner', async (messages: BaseMessage[], config?: RunnableConfig) => {
-  // Update initial progress
-  updateProgress('planner', 'Creating plan...', config)
+export const plannerTask = task(
+  'planner',
+  async (input: { messages: BaseMessage[] }, config?: RunnableConfig) => {
+    // Stream initial progress
+    const streamResponses = []
+    streamResponses.push({
+      type: 'progress',
+      content: 'Creating plan...',
+      timestamp: Date.now(),
+      shouldDisplay: true,
+      priority: 50,
+    })
 
-  // Convert messages to string for context
-  const context = messages.map(getMessageString).join('\n')
+    // Convert messages to string for context
+    const context = input.messages.map(getMessageString).join('\n')
 
-  // Generate plan using LLM
-  const response = await llm.invoke(
-    `Based on the following conversation, create a plan for implementing the user's request:
+    // Generate plan using LLM
+    const response = await llm.invoke(
+      `Based on the following conversation, create a plan for implementing the user's request:
 
       ${context}
 
@@ -28,24 +37,60 @@ export const plannerTask = task('planner', async (messages: BaseMessage[], confi
       3. Any potential challenges or considerations
 
       Keep the response concise but informative.`
-  )
+    )
 
-  // Parse response into sections
-  const content =
-    typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
-  const [explanation, ...planSteps] = content.split('\n\n')
+    // Parse response into sections
+    const content =
+      typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
+    const [explanation, ...planSteps] = content.split('\n\n')
 
-  // Send explanation to chat window
-  sendTaskResponse('planner', explanation)
+    // Stream explanation to chat
+    streamResponses.push({
+      type: 'plan',
+      content: explanation,
+      timestamp: Date.now(),
+      shouldDisplay: true,
+      priority: 80,
+    })
 
-  // Create structured response
-  const result = PlannerTaskSchema.parse({
-    plan: planSteps.join('\n\n'),
-    response: explanation, // This will be shown in the chat window
-  })
+    // Stream each plan step
+    planSteps.forEach((step, index) => {
+      streamResponses.push({
+        type: 'plan',
+        content: `Step ${index + 1}: ${step}`,
+        timestamp: Date.now(),
+        shouldDisplay: true,
+        priority: 70,
+      })
+    })
 
-  // Update progress with completion
-  sendTaskComplete('planner', 'Plan created')
+    // Create final response
+    const result = PlannerTaskSchema.parse({
+      plan: planSteps.join('\n\n'),
+      response: {
+        type: 'plan',
+        content: explanation,
+        timestamp: Date.now(),
+        shouldDisplay: true,
+        priority: 100,
+      },
+      streamResponses,
+      steps: planSteps.map((step, index) => ({
+        step: `${index + 1}`,
+        description: step,
+        status: 'pending',
+      })),
+    })
 
-  return result
-})
+    // Stream completion status
+    streamResponses.push({
+      type: 'progress',
+      content: 'Plan created successfully',
+      timestamp: Date.now(),
+      shouldDisplay: true,
+      priority: 50,
+    })
+
+    return result
+  }
+)

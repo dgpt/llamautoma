@@ -1,10 +1,10 @@
 // @ts-nocheck - Disable TypeScript checks as we're removing types
 import { BaseMessage, HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages'
-import { entrypoint, task, MemorySaver } from '@langchain/langgraph'
+import { entrypoint, task } from '@langchain/langgraph'
 import { ToolNode } from '@langchain/langgraph/prebuilt'
 import { plannerTask } from './tasks/planner'
 import { reviewerTask } from './tasks/reviewer'
-import { fileOperationTask } from './tasks/coder'
+import { fileOperationTask as coder } from './tasks/coder'
 import { summarizerTask } from './tasks/summarizer'
 import { intentTask } from './tasks/intent'
 import { logger } from '@/logger'
@@ -18,6 +18,10 @@ import { evalTool } from './tools/eval'
 import { fileTool } from './tools/file'
 import { llm } from './llm'
 import { getMessageString } from './tasks/lib'
+import { RunnableConfig } from '@langchain/core/runnables'
+import { MemorySaver } from '@langchain/langgraph/prebuilt'
+import { TaskTypeSchema } from './tasks/schemas/tasks'
+import { StreamHandler } from './utils/stream'
 
 // Convert Message to BaseMessage
 function toBaseMessage(msg: Message): BaseMessage {
@@ -57,8 +61,11 @@ export const toolNode = new ToolNode(tools)
 // Bind tools to LLM
 const modelWithTools = llm.bindTools(tools)
 
-// Create checkpointer for persistence
+// Create memory saver for workflow checkpointing
 const checkpointer = new MemorySaver()
+
+// Create stream handler for client communication
+const streamHandler = new StreamHandler()
 
 // Task to call model directly for chat
 const chatTask = task('chat', async (messages: BaseMessage[]) => {
@@ -72,91 +79,125 @@ const toolTask = task('tools', async state => {
   return result
 })
 
-// Main workflow using functional API
+/**
+ * Main workflow that coordinates all tasks
+ */
 const workflow = entrypoint(
   { checkpointer, name: 'llamautoma' },
-  async (input: { messages: BaseMessage[] }) => {
-    const { messages } = input
+  async (input: { messages: BaseMessage[] }, config?: RunnableConfig) => {
+    // Determine intent first
+    const intentResult = await intentTask.invoke(input, config)
 
-    // Determine intent
-    const intent = await intentTask({ messages })
-
-    // For chat requests, invoke LLM directly
-    if (intent === 'chat') {
-      return await chatTask(messages)
-    }
-
-    // For code generation, follow the evaluator-optimizer loop
-    let currentMessages = messages
-
-    // Check if we need to summarize (context too long)
-    if (currentMessages.length > DEFAULT_CONFIG.maxContextLength) {
-      const summary = await summarizerTask({ messages: currentMessages })
-      currentMessages = summary.messages
-    }
-
-    // Planner -> Reviewer loop (max 10 iterations)
-    let plan: Plan | undefined
-    let planReview
-    let planAttempts = 0
-
-    while (planAttempts < DEFAULT_CONFIG.maxPlanAttempts) {
-      plan = await plannerTask({ messages: currentMessages, review: planReview })
-      planReview = await reviewerTask({ messages: currentMessages, plan })
-
-      if (planReview.approved) break
-      planAttempts++
-    }
-
-    // Process each step in the plan
-    const results = []
-    for (const step of plan.steps || []) {
-      // Handle any tool calls first
-      if (step.tool_calls) {
-        for (const toolCall of step.tool_calls) {
-          const toolResult = await toolNode.invoke(toolCall)
-          results.push({
-            type: 'tool_result',
-            step: step.description,
-            tool: toolCall.tool,
-            result: toolResult,
-          })
-        }
-      }
-
-      // Handle file operations if present
-      if (step.file) {
-        const fileResult = await fileOperationTask({
-          file: step.file,
-          messages: currentMessages,
-          config: input.config,
-        })
-        if (fileResult) {
-          results.push({
-            type: 'file_result',
-            step: step.description,
-            result: fileResult,
-          })
-        }
+    // If chat intent, return direct LLM response
+    if (intentResult.type === 'chat') {
+      return {
+        type: 'chat',
+        messages: input.messages,
+        response: intentResult.response,
       }
     }
 
-    // Generate final diff for all file modifications
-    const filesToDiff = results.filter(r => r.type === 'file_result').map(r => r.result)
+    // Check if we need to summarize (configurable threshold)
+    let messages = input.messages
+    if (messages.length > 10) {
+      // TODO: Make configurable
+      const summaryResult = await summarizerTask.invoke({ messages }, config)
+      messages = summaryResult.messages
+    }
 
-    const diff =
-      filesToDiff.length > 0
-        ? await toolNode.invoke({
-            tool: 'diff',
-            input: { files: filesToDiff },
-          })
-        : null
+    // Generate plan
+    const planResult = await plannerTask.invoke({ messages }, config)
+
+    // Review plan
+    let planReviewResult = await reviewerTask.invoke(
+      {
+        messages,
+        plan: planResult.plan,
+      },
+      config
+    )
+
+    // Retry planning if review fails (up to 3 times)
+    let attempts = 0
+    while (!planReviewResult.approved && attempts < 3) {
+      const newPlanResult = await plannerTask.invoke(
+        {
+          messages: [
+            ...messages,
+            {
+              type: 'system',
+              content: `Previous plan rejected. Feedback: ${planReviewResult.feedback}`,
+            },
+          ],
+        },
+        config
+      )
+
+      planReviewResult = await reviewerTask.invoke(
+        {
+          messages,
+          plan: newPlanResult.plan,
+        },
+        config
+      )
+
+      attempts++
+    }
+
+    // Generate code based on approved plan
+    const codeResult = await coder.invoke(
+      {
+        messages,
+        plan: planResult.plan,
+      },
+      config
+    )
+
+    // Review code
+    let codeReviewResult = await reviewerTask.invoke(
+      {
+        messages,
+        code: codeResult,
+      },
+      config
+    )
+
+    // Retry code generation if review fails (up to 3 times)
+    attempts = 0
+    while (!codeReviewResult.approved && attempts < 3) {
+      const newCodeResult = await coder.invoke(
+        {
+          messages: [
+            ...messages,
+            {
+              type: 'system',
+              content: `Previous code rejected. Feedback: ${codeReviewResult.feedback}`,
+            },
+          ],
+        },
+        config
+      )
+
+      codeReviewResult = await reviewerTask.invoke(
+        {
+          messages,
+          code: newCodeResult,
+        },
+        config
+      )
+
+      attempts++
+    }
 
     return {
-      messages: currentMessages,
-      plan,
-      results,
-      diff,
+      type: 'code',
+      messages,
+      plan: planResult,
+      code: codeResult,
+      reviews: {
+        plan: planReviewResult,
+        code: codeReviewResult,
+      },
     }
   }
 )
@@ -164,12 +205,8 @@ const workflow = entrypoint(
 // Export workflow with proper config handling
 export const llamautoma = {
   invoke: async (input, config) => {
-    // Convert input messages to BaseMessages
-    const messages = (input.messages || []).map(toBaseMessage)
-
-    // Run workflow
     const result = await workflow.invoke(
-      { messages },
+      { messages: input.messages || [] },
       {
         configurable: {
           thread_id: input.id || 'default',
@@ -178,27 +215,12 @@ export const llamautoma = {
         },
       }
     )
-
-    // Convert result messages back to regular messages
-    return {
-      status: 'success',
-      metadata: {
-        messages: result.messages.map(toMessage),
-        threadId: input.id,
-        plan: result.plan,
-        results: result.results,
-        diff: result.diff,
-      },
-    }
+    return result
   },
 
   stream: async function* (input, config) {
-    // Convert input messages to BaseMessages
-    const messages = (input.messages || []).map(toBaseMessage)
-
-    // Stream workflow
     const stream = await workflow.stream(
-      { messages },
+      { messages: input.messages || [] },
       {
         configurable: {
           thread_id: input.id || 'default',
@@ -210,16 +232,25 @@ export const llamautoma = {
     )
 
     for await (const chunk of stream) {
-      yield {
-        status: 'streaming',
-        metadata: {
-          messages: chunk.messages.map(toMessage),
-          threadId: input.id,
-          step: chunk.metadata?.step || 'processing',
-          plan: chunk.plan,
-          results: chunk.results,
-          diff: chunk.diff,
-        },
+      // Stream each response from tasks
+      if (chunk.streamResponses) {
+        for (const response of chunk.streamResponses) {
+          yield {
+            type: response.type,
+            content: response.content,
+            metadata: response.metadata,
+            timestamp: response.timestamp,
+          }
+        }
+      }
+
+      // Stream final result
+      if (chunk.type === 'complete') {
+        yield {
+          type: 'complete',
+          result: chunk.result,
+          metadata: chunk.metadata,
+        }
       }
     }
   },

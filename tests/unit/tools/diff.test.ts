@@ -65,12 +65,17 @@ export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
     const result = await waitForResponse(ctx.chatModel.invoke(messages))
     const diff = result.content as string
 
+    // Log the actual diff output for debugging
+    console.log('Actual diff output:', diff)
+
     // Validate diff format
     expect(diff).toBeTruthy()
-    expect(diff).toContain('diff')
-    expect(diff).toContain('useState')
-    expect(diff).toContain('let count = 0')
-    expect(diff).toContain('CounterProps')
+    expect(diff).toContain('diff --git')
+    expect(diff).toContain('src/components/Counter.tsx')
+    expect(diff).toContain('-  let count = 0')
+    expect(diff).toContain('+  const [count, setCount] = useState(initialValue)')
+    expect(diff).toContain('onClick={decrement}')
+    expect(diff).toContain('button')
   })
 
   test('should handle new file creation', async () => {

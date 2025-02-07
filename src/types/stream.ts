@@ -4,18 +4,18 @@ import { z } from 'zod'
  * Base event schema that all events must follow
  */
 export const BaseEventSchema = z.object({
-  type: z.enum(['response', 'progress', 'error', 'complete']),
-  task: z.string(),
-  timestamp: z.number(),
+  type: z.enum(['response', 'progress', 'error', 'complete']).describe('Type of stream event'),
+  task: z.string().describe('Task that generated this event'),
+  timestamp: z.number().describe('When the event was generated'),
 })
 
 /**
- * Schema for response events (content shown in chat)
+ * Schema for response events (shown in chat window)
  */
 export const ResponseEventSchema = BaseEventSchema.extend({
   type: z.literal('response'),
-  content: z.string(),
-  metadata: z.record(z.any()).optional(),
+  content: z.string().describe('Content to display'),
+  metadata: z.record(z.any()).optional().describe('Optional metadata about the response'),
 })
 
 /**
@@ -23,7 +23,7 @@ export const ResponseEventSchema = BaseEventSchema.extend({
  */
 export const ProgressEventSchema = BaseEventSchema.extend({
   type: z.literal('progress'),
-  status: z.string(),
+  status: z.string().describe('Current status message'),
 })
 
 /**
@@ -31,7 +31,7 @@ export const ProgressEventSchema = BaseEventSchema.extend({
  */
 export const ErrorEventSchema = BaseEventSchema.extend({
   type: z.literal('error'),
-  error: z.string(),
+  error: z.string().describe('Error message'),
 })
 
 /**
@@ -39,7 +39,8 @@ export const ErrorEventSchema = BaseEventSchema.extend({
  */
 export const CompleteEventSchema = BaseEventSchema.extend({
   type: z.literal('complete'),
-  final_status: z.string().optional(),
+  final_status: z.string().optional().describe('Final status message'),
+  responses: z.array(z.any()).optional().describe('Collection of responses from the task'),
 })
 
 /**
