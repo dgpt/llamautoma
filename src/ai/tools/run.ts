@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { StructuredTool } from '@langchain/core/tools'
+import { tool } from '@langchain/core/tools'
 import { streamToClient, waitForClientResponse } from '../utils/stream'
 import { logger } from '@/logger'
 
@@ -50,12 +50,9 @@ export type CommandResponse = {
   error?: string
 }
 
-export class RunTool extends StructuredTool {
-  name = 'run'
-  description = 'Execute shell commands in the client workspace'
-  schema = runInputSchema
-
-  async _call(input: z.infer<typeof runInputSchema>): Promise<string> {
+// Create the run tool using LangChain's tool function
+export const runTool = tool(
+  async (input: z.infer<typeof runInputSchema>) => {
     try {
       // Format request for client
       const clientRequest = {
@@ -121,5 +118,10 @@ export class RunTool extends StructuredTool {
       logger.error({ error }, 'Run tool error')
       throw new Error(`Failed to execute command: ${message}`)
     }
+  },
+  {
+    name: 'run',
+    description: 'Execute shell commands in the client workspace',
+    schema: runInputSchema,
   }
-}
+)

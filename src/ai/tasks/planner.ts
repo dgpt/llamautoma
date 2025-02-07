@@ -1,67 +1,51 @@
-import { BaseMessage, SystemMessage } from '@langchain/core/messages'
-import { createStructuredLLM } from '../llm'
-import { PlanSchema } from 'llamautoma-types'
-import type { Review, Plan } from 'llamautoma-types'
-import { getMessageString } from './lib'
-import { StructuredOutputParser } from '@langchain/core/output_parsers'
-import { logger } from '@/logger'
+import { task } from '@langchain/langgraph'
+import { BaseMessage } from '@langchain/core/messages'
+import { RunnableConfig } from '@langchain/core/runnables'
+import { PlannerTaskSchema } from './schemas/tasks'
+import { llm } from '../llm'
+import { getMessageString } from '../tasks/lib'
+import { updateProgress, sendTaskResponse, sendTaskComplete } from '../utils/stream'
 
-// Create planner with structured output
-const planner = createStructuredLLM<Plan>(PlanSchema)
+/**
+ * Creates a plan for code generation based on user request
+ */
+export const plannerTask = task('planner', async (messages: BaseMessage[], config?: RunnableConfig) => {
+  // Update initial progress
+  updateProgress('planner', 'Creating plan...', config)
 
-// Create the planner task
-export const plannerTask = async ({
-  messages,
-  review,
-}: {
-  messages: BaseMessage[]
-  review?: Review
-}): Promise<Plan> => {
-  // Combine messages into context
-  const context = messages.map(msg => getMessageString(msg)).join('\n')
-  const parser = StructuredOutputParser.fromZodSchema(PlanSchema)
-  const formatInstructions = parser.getFormatInstructions()
+  // Convert messages to string for context
+  const context = messages.map(getMessageString).join('\n')
 
-  logger.debug(`Planner invoked with messages: ${context}`)
-  if (review) {
-    logger.debug(`Previous review: ${JSON.stringify(review)}`)
-  }
+  // Generate plan using LLM
+  const response = await llm.invoke(
+    `Based on the following conversation, create a plan for implementing the user's request:
 
-  // Generate plan using structured LLM
-  const result = await planner.invoke([
-    new SystemMessage(formatInstructions),
-    new SystemMessage(
-      `You are a code planning assistant. Your job is to break down code tasks into clear, actionable steps.
+      ${context}
 
-${review ? `Previous review feedback: ${review.feedback}\n${review.suggestions?.map(s => `- ${s.step}: ${s.action}`).join('\n')}\n` : ''}
-Conversation:
-${context}
+      Respond with:
+      1. A clear explanation of what needs to be done
+      2. Step by step plan for implementation
+      3. Any potential challenges or considerations
 
-When planning code changes:
-1. Break down the task into clear steps
-2. Include file patterns and dependencies
-3. Consider error handling and testing
+      Keep the response concise but informative.`
+  )
 
-Example format:
-{
-  "response": "I'll help you implement [feature]. Here's the plan:",
-  "steps": [
-    "Create file src/components/Counter.tsx",
-    "Add React component structure",
-    "Implement state management",
-    "Add increment/decrement functions",
-    "Style the component",
-    "Add error handling",
-    "Write tests"
-  ]
-}
-`
-    ),
-  ])
+  // Parse response into sections
+  const content =
+    typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
+  const [explanation, ...planSteps] = content.split('\n\n')
 
-  logger.debug(`Planner response: ${JSON.stringify(result)}`)
-  return {
-    response: result.response,
-    steps: result.steps,
-  }
-}
+  // Send explanation to chat window
+  sendTaskResponse('planner', explanation)
+
+  // Create structured response
+  const result = PlannerTaskSchema.parse({
+    plan: planSteps.join('\n\n'),
+    response: explanation, // This will be shown in the chat window
+  })
+
+  // Update progress with completion
+  sendTaskComplete('planner', 'Plan created')
+
+  return result
+})

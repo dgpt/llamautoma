@@ -1,12 +1,7 @@
 import { z } from 'zod'
+import { tool } from '@langchain/core/tools'
 import { logError } from '@/logger'
 import { createContext, runInContext } from 'vm'
-import { StructuredTool } from '@langchain/core/tools'
-
-interface TypeScriptExecutionConfig {
-  maxIterations?: number
-  maxOutputLength?: number
-}
 
 interface ExecutionContext {
   console: {
@@ -25,33 +20,55 @@ interface ExecutionResult {
   logs: string[]
 }
 
-export class EvalTool extends StructuredTool {
-  name = 'eval'
-  description = 'Evaluate TypeScript code in a secure environment and return the result'
-  schema = z.object({
-    code: z.string().describe('The TypeScript code to evaluate'),
-  })
+// Schema for eval input
+const evalInputSchema = z.object({
+  code: z.string().describe('The TypeScript code to evaluate'),
+  maxIterations: z.number().optional().describe('Maximum number of iterations allowed'),
+  maxOutputLength: z.number().optional().describe('Maximum length of output allowed'),
+})
 
-  private config: TypeScriptExecutionConfig
-  private currentContext: ExecutionContext | null = null
+// Create a function to capture output
+function createOutputCapture(maxOutputLength: number) {
+  const output: string[] = []
 
-  constructor(config: TypeScriptExecutionConfig = {}) {
-    super()
-    this.config = {
-      maxIterations: config.maxIterations || 1000,
-      maxOutputLength: config.maxOutputLength || 1000,
-    }
+  return {
+    capture: (args: any[], level: 'log' | 'error' | 'warn' | 'info' = 'log'): void => {
+      const formattedOutput = args
+        .map(arg => {
+          if (typeof arg === 'string') return arg
+          try {
+            return JSON.stringify(arg)
+          } catch {
+            return String(arg)
+          }
+        })
+        .join(' ')
+
+      if (formattedOutput.length > maxOutputLength) {
+        throw new Error('Output exceeds maximum length')
+      }
+
+      output.push(`[${level}] ${formattedOutput}`)
+    },
+    getOutput: () => output,
   }
+}
 
-  async _call(input: { code: string }): Promise<string> {
+// Create the eval tool using LangChain's tool function
+export const evalTool = tool(
+  async (input: z.infer<typeof evalInputSchema>) => {
+    const maxIterations = input.maxIterations || 1000
+    const maxOutputLength = input.maxOutputLength || 1000
+    const outputCapture = createOutputCapture(maxOutputLength)
+
     try {
       // Create execution context
-      this.currentContext = {
+      const context: ExecutionContext = {
         console: {
-          log: (...args) => this.captureOutput(args, 'log'),
-          error: (...args) => this.captureOutput(args, 'error'),
-          warn: (...args) => this.captureOutput(args, 'warn'),
-          info: (...args) => this.captureOutput(args, 'info'),
+          log: (...args) => outputCapture.capture(args, 'log'),
+          error: (...args) => outputCapture.capture(args, 'error'),
+          warn: (...args) => outputCapture.capture(args, 'warn'),
+          info: (...args) => outputCapture.capture(args, 'info'),
         },
         output: [],
         iterations: 0,
@@ -61,14 +78,14 @@ export class EvalTool extends StructuredTool {
       // Execute code
       const result = runInContext(
         `function main() { ${input.code} } main()`,
-        createContext(this.currentContext)
+        createContext(context)
       )
-      this.currentContext.lastValue = result
+      context.lastValue = result
 
       // Format output and logs
       const executionResult: ExecutionResult = {
         result: String(result),
-        logs: this.currentContext.output,
+        logs: outputCapture.getOutput(),
       }
 
       // Return formatted result
@@ -79,31 +96,11 @@ export class EvalTool extends StructuredTool {
     } catch (error) {
       logError('typescript-execution', error instanceof Error ? error.message : String(error))
       throw error
-    } finally {
-      this.currentContext = null
     }
+  },
+  {
+    name: 'eval',
+    description: 'Evaluate TypeScript code in a secure environment and return the result',
+    schema: evalInputSchema,
   }
-
-  private captureOutput(args: any[], level: 'log' | 'error' | 'warn' | 'info' = 'log'): void {
-    if (!this.currentContext) {
-      throw new Error('No active execution context')
-    }
-
-    const output = args
-      .map(arg => {
-        if (typeof arg === 'string') return arg
-        try {
-          return JSON.stringify(arg)
-        } catch {
-          return String(arg)
-        }
-      })
-      .join(' ')
-
-    if (output.length > this.config.maxOutputLength!) {
-      throw new Error('Output exceeds maximum length')
-    }
-
-    this.currentContext.output.push(`[${level}] ${output}`)
-  }
-}
+)

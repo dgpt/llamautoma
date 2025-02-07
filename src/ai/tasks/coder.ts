@@ -1,77 +1,143 @@
-import { BaseMessage, HumanMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
-import { createStructuredLLM } from '../llm'
-import { GeneratedCodeSchema } from 'llamautoma-types'
-import type { Plan, Review, GeneratedCode } from 'llamautoma-types'
-import { getMessageString } from './lib'
-import { logger } from '@/logger'
+import { BaseMessage } from '@langchain/core/messages'
+import { RunnableConfig } from '@langchain/core/runnables'
+import { CoderTaskSchema, ReviewerTaskSchema } from './schemas/tasks'
+import { FileSchema } from '../tools/schemas/file'
+import { z } from 'zod'
+import { llm } from '../llm'
+import { getMessageString } from '../tasks/lib'
+import { updateProgress, sendTaskResponse, sendTaskComplete } from '../utils/stream'
+import { parseSections } from '../lib/parse'
 
-// Create coder with structured output
-const coder = createStructuredLLM<GeneratedCode>(GeneratedCodeSchema)
-
-// Create the coder task
+/**
+ * Generates code based on the plan and user requirements
+ */
 export const coderTask = task(
   'coder',
-  async ({
-    messages,
-    plan,
-    review,
-  }: {
-    messages: BaseMessage[]
-    plan: Plan
-    review?: Review
-  }): Promise<GeneratedCode> => {
-    // Combine messages into context
-    const context = messages.map(msg => getMessageString(msg)).join('\n')
-
-    logger.debug(`Coder invoked with plan: ${JSON.stringify(plan)}`)
-    if (review) {
-      logger.debug(`Previous review: ${JSON.stringify(review)}`)
-    }
-
-    const prompt = `You are a code generator. Your job is to generate complete, runnable code that EXACTLY fulfills the user's requirements.
-
-${review ? `Previous review feedback: ${review.feedback}\n${review.suggestions?.map(s => `- ${s.step}: ${s.action}`).join('\n')}\n` : ''}
-
-Conversation Context:
-${context}
-
-Plan to Implement:
-${JSON.stringify(plan, null, 2)}
-
-Requirements:
-1. Generate COMPLETE, runnable code files
-2. Include ALL necessary imports and dependencies
-3. Follow the language's best practices and conventions
-4. Add descriptive comments and documentation
-5. Implement proper error handling
-6. Use appropriate type system for the language
-7. Include necessary configuration files
-8. List ALL required dependencies
-
-Response Format:
-{
-  "files": [
+  async (
     {
-      "path": "relative/path/to/file",
-      "content": "complete file content",
-      "type": "create|modify|delete",
-      "description": "what this file does"
-    }
-  ],
-  "dependencies": [
-    "package-name@version",
-    "another-package@^1.0.0"
-  ]
-}`
+      messages,
+      plan,
+      review,
+    }: {
+      messages: BaseMessage[]
+      plan: string
+      review?: z.infer<typeof ReviewerTaskSchema>
+    },
+    config?: RunnableConfig
+  ) => {
+    // Update initial progress
+    updateProgress('coder', 'Generating code...', config)
 
-    // Generate code using structured LLM
-    const result = await coder.invoke([new HumanMessage(prompt)])
-    logger.debug(`Coder response: ${JSON.stringify(result)}`)
+    // Convert messages to string for context
+    const context = messages.map(getMessageString).join('\n')
 
-    return {
-      files: result.files,
-      dependencies: result.dependencies || [],
+    // Generate code using LLM
+    const response = await llm.invoke(
+      `Generate code based on the following context and plan:
+
+      CONVERSATION CONTEXT:
+      ${context}
+
+      PLAN:
+      ${plan}
+
+      ${
+        review
+          ? `REVIEW FEEDBACK:
+      ${review.feedback}
+
+      SUGGESTIONS:
+      ${review.suggestions?.map((suggestion: { step: string; action: string }) => `- ${suggestion.step}: ${suggestion.action}`).join('\n')}`
+          : ''
+      }
+
+      Respond with:
+      1. A brief explanation of the implementation
+      2. The complete code for each file needed
+      3. Any dependencies required
+
+      For each file, include:
+      - File path
+      - Complete file content
+      - Brief description of the file's purpose
+
+      Focus on:
+      - Code quality and readability
+      - Proper error handling
+      - Type safety and documentation
+      - Testing and maintainability
+
+      Keep the implementation clean and efficient.`
+    )
+
+    // Parse response sections
+    const content =
+      typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
+    const [explanation, ...sections] = parseSections(content)
+
+    // Send explanation to chat window
+    sendTaskResponse('coder', explanation)
+
+    // Parse file sections
+    const files = []
+    let currentFile = null
+
+    for (const section of sections) {
+      if (section.startsWith('File:') || section.startsWith('Path:')) {
+        // Start new file
+        if (currentFile) {
+          files.push(currentFile)
+          // Send file info to chat window
+          sendTaskResponse(
+            'coder',
+            `\nCreating file: ${currentFile.path}\n${currentFile.description || ''}`
+          )
+        }
+        const [pathLine, ...contentLines] = section.split('\n')
+        const path = pathLine.split(':')[1].trim()
+        currentFile = {
+          path,
+          content: '',
+          type: 'create' as const,
+          description: '',
+        }
+      } else if (section.startsWith('Description:')) {
+        // Add description to current file
+        if (currentFile) {
+          currentFile.description = section.split(':')[1].trim()
+        }
+      } else if (currentFile) {
+        // Add content to current file
+        currentFile.content = section
+      }
     }
+
+    // Add last file
+    if (currentFile) {
+      files.push(currentFile)
+      // Send last file info to chat window
+      sendTaskResponse(
+        'coder',
+        `\nCreating file: ${currentFile.path}\n${currentFile.description || ''}`
+      )
+    }
+
+    // Validate files
+    const validatedFiles = files.map(file => FileSchema.parse(file))
+
+    // Create structured response
+    const result = CoderTaskSchema.parse({
+      files: validatedFiles,
+      explanation,
+      response: `Generated ${validatedFiles.length} file(s):\n${validatedFiles
+        .map(f => `- ${f.path}`)
+        .join('\n')}`,
+    })
+
+    // Update progress with completion
+    sendTaskComplete('coder', `Generated ${validatedFiles.length} file(s)`)
+
+    return result
   }
 )

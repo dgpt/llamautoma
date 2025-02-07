@@ -42,22 +42,101 @@ Llamautoma is a TypeScript-based AI agent framework built on LangChain.js and La
    - Feedback collection
    - Pattern detection
 
-## Implementation Plan
+## Compression & Encoding Strategy
 
-### Phase 1: Core Infrastructure
-1. Set up Bun server
-2. Implement streaming endpoints
-3. Configure LangChain.js integration
+### File Compression
+1. All file content MUST be compressed using Brotli
+   - Use brotliCompress/brotliDecompress from zlib
+   - Wrap in promisify for async usage
+   - Apply to all file content before transmission
 
-### Phase 2: AI System
-1. Implement chat functionality
-2. Add workspace synchronization
-3. Set up LangGraph.js workflows
+### Message Compression
+1. All messages MUST be compressed using MessagePack
+   - Use @msgpack/msgpack for encoding/decoding
+   - Apply to all request/response bodies
+   - Handle streaming messages properly
 
-### Phase 3: Safety & Testing
-1. Add input validation
-2. Implement safety checks
-3. Write comprehensive tests
+### String Encoding
+1. All binary data MUST be encoded using Base85
+   - Use @alttiri/base85 for encoding/decoding
+   - More efficient than base64 (4 bytes -> 5 chars vs 3 bytes -> 4 chars)
+   - Better compression ratio for code content
+
+### Implementation Details
+1. File Operations
+   ```typescript
+   // Compress and encode file content
+   async function compressAndEncodeFile(content: string): Promise<string> {
+     const compressed = await brotliCompressAsync(Buffer.from(content))
+     return base85Encode(compressed)
+   }
+
+   // Decode and decompress file content
+   async function decodeAndDecompressFile(encodedStr: string): Promise<string> {
+     const compressed = Buffer.from(base85Decode(encodedStr))
+     const decompressed = await brotliDecompressAsync(compressed)
+     return decompressed.toString('utf-8')
+   }
+   ```
+
+2. Message Operations
+   ```typescript
+   // Compress and encode message
+   function compressAndEncodeMessage(message: any): string {
+     const msgpacked = msgpackEncode(message)
+     return base85Encode(Buffer.from(msgpacked))
+   }
+
+   // Decode and decompress message
+   function decodeAndDecompressMessage(encodedStr: string): any {
+     const msgpacked = Buffer.from(base85Decode(encodedStr))
+     return msgpackDecode(msgpacked)
+   }
+   ```
+
+3. Streaming Support
+   - Use ReadableStream for all streaming operations
+   - Properly handle compression in chunks
+   - Maintain proper backpressure
+   - Clean up resources (e.g., reader.releaseLock())
+
+### Client-Server Communication
+1. Request Headers
+   - 'Content-Type': 'application/x-msgpack' for compressed messages
+   - 'Accept': 'application/x-msgpack' to request compressed responses
+
+2. Response Headers
+   - 'Content-Type': 'application/x-msgpack' for compressed messages
+   - 'Content-Type': 'text/event-stream' for SSE
+   - 'Cache-Control': 'no-cache' for SSE
+   - 'Connection': 'keep-alive' for SSE
+
+3. SSE Events
+   - Compress event data with MessagePack + Base85
+   - Format: `event: ${event}\ndata: ${compressed}\n\n`
+   - Include retry timing: 'retry: 1000\n\n'
+
+### Error Handling
+1. Compression Errors
+   - Return 400 status for invalid compressed content
+   - Properly propagate compression errors
+   - Clean up resources on error
+
+2. Streaming Errors
+   - Handle reader/writer errors gracefully
+   - Always release locks in finally blocks
+   - Close controllers when appropriate
+
+### Performance Considerations
+1. Chunk Sizes
+   - Use 1MB chunks for file streaming
+   - Balance memory usage vs compression efficiency
+   - Consider client memory constraints
+
+2. Compression Order
+   - Files: Content -> Brotli -> Base85
+   - Messages: Content -> MessagePack -> Base85
+   - Maintain consistent order in all operations
 
 ## Testing Strategy
 1. Unit Tests
@@ -75,24 +154,6 @@ Llamautoma is a TypeScript-based AI agent framework built on LangChain.js and La
    - Error scenarios
    - Performance testing
 
-## Documentation
-1. API Reference
-2. Setup Guide
-3. Usage Examples
-4. Safety Guidelines
-
-## Deployment
-1. Development Environment
-2. Staging Setup
-3. Production Release
-
-## Timeline
-- Phase 1: 1 week
-- Phase 2: 2 weeks
-- Phase 3: 1 week
-- Testing & Documentation: 1 week
-- Total: 5 weeks
-
 # Refactoring src/agents
 We will remove src/agents and replace it with src/ai.
 Project structure will look something like this:
@@ -104,12 +165,16 @@ src/ai
     - reviewer.ts <- reviews the code to ensure it fulfill's the user's request
     - planner.ts <- interprets user's request and writes a plan for the code
     - summarizer.ts <- summarizes messages
-    - tester.ts <- proposes test commands to run based on current project's architecture
-    - diff.ts <- examines existing workspace code and generated code from ai/coder, identifying changes required, then producing a diff of changes required
+    - lib.ts <- shared libraries
+    - intent.ts <- determines the intent of the user's request
+
   - tools/ <- any atomic tools
     - eval.ts <- eval's ts safely using Bun.eval()
-    - search.ts <- web search tool
+    - search.ts <- web search tool, finds web pages relevant to the user's request
+    - extract.ts <- extracts text from web pages (use in conjunction with search.ts)
     - run.ts <- handles running shell commands (via the coc.nvim plugin)
+    - diff.ts <- examines existing workspace code and generated code from ai/coder, identifying changes required, then producing a diff of changes required
+    - file.ts <- handles file operations
 
 ## File Streaming Implementation
 The system implements efficient file streaming between server and client:
@@ -197,10 +262,12 @@ export default new ChatOllama({
 - refactor src/index.ts as necessary
 
 ### Implement an Evaluator-Optimizer loop for writing code
-  - entrypoint -> summarizer -> planner -> reviewer -> coder -> reviewer -> diff -> result
+  - entrypoint -> intent == 'chat' ? invoke llm directly, return response : summarizer -> planner -> reviewer -> coder -> reviewer -> diff -> result
+  - intent is used to determine the intent of the user's request, chat or code generation
+  - chat requests are handled by invoking the llm directly
+  - code generation requests are handled by the evaluator-optimizer loop
   - summarizer ONLY runs when message context gets too long (configurable)
-  - planner can request user input if plan is user prompt is too vague
-  - planner can also respond with a final request when there is no task to perform (e.g. casual conversation)
+  - planner creates a plan based on the user's request and the message history
   - reviewer reviews planner's plan to ensure it fulfill's user's request
   - if review fails, it is sent back to the planner. this repeats a configurable number of times (default 10)
   - auto-pass at max iterations

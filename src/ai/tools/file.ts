@@ -1,11 +1,12 @@
 import { z } from 'zod'
-import { StructuredTool } from '@langchain/core/tools'
+import { tool } from '@langchain/core/tools'
 import { streamToClient, waitForClientResponse } from '../utils/stream'
 import { logger } from '@/logger'
 import { FileOp } from 'llamautoma-types'
+import { decodeFile } from '../lib/compression'
 
 // Schema for file request types
-export const FileInputSchema = z.object({
+const FileInputSchema = z.object({
   requestType: z
     .enum(['file', 'files', 'directory', 'directories'])
     .describe(
@@ -15,8 +16,6 @@ export const FileInputSchema = z.object({
   includePattern: z.string().optional().describe('A pattern to include in the search'),
   excludePattern: z.string().optional().describe('A pattern to exclude from the search'),
 })
-
-export type FileRequest = z.infer<typeof FileInputSchema>
 
 // Schema for file chunk response
 const FileChunkResponseSchema = z.object({
@@ -51,12 +50,9 @@ export type FileResponse = {
   [path: string]: FileOp
 }
 
-export class FileTool extends StructuredTool<typeof FileInputSchema> {
-  name = 'file'
-  description = 'Read files and directories from the workspace'
-  schema = FileInputSchema
-
-  async _call(input: FileRequest): Promise<string> {
+// Create the file tool using LangChain's tool function
+export const fileTool = tool(
+  async (input: z.infer<typeof FileInputSchema>) => {
     try {
       // Format request for client
       const clientRequest = {
@@ -104,8 +100,14 @@ export class FileTool extends StructuredTool<typeof FileInputSchema> {
               continue
             }
 
-            // Append chunk
-            files[path].content += chunk
+            // Handle compressed chunk
+            if (chunk.startsWith('brotli:')) {
+              const decompressed = await decodeFile(chunk.slice(7))
+              files[path].content += decompressed
+            } else {
+              // Handle uncompressed chunk for backward compatibility
+              files[path].content += chunk
+            }
             break
 
           case 'file_complete':
@@ -122,5 +124,10 @@ export class FileTool extends StructuredTool<typeof FileInputSchema> {
       logger.error({ error }, 'File tool error')
       throw new Error(`Failed to read files: ${message}`)
     }
+  },
+  {
+    name: 'file',
+    description: 'Read files and directories from the workspace',
+    schema: FileInputSchema,
   }
-}
+)

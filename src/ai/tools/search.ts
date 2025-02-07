@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { StructuredTool } from '@langchain/core/tools'
+import { tool } from '@langchain/core/tools'
 import { tavily } from '@tavily/core'
 
 // Initialize Tavily client
@@ -28,12 +28,9 @@ const searchOutputSchema = z.object({
   searchDepth: z.enum(['basic', 'advanced']).optional(),
 })
 
-export class SearchTool extends StructuredTool {
-  name = 'search'
-  description = 'Search the web for information using Tavily'
-  schema = searchInputSchema
-
-  async _call(input: z.infer<typeof searchInputSchema>): Promise<string> {
+// Create the search tool using LangChain's tool function
+export const searchTool = tool(
+  async (input: z.infer<typeof searchInputSchema>) => {
     try {
       const { query, searchDepth = 'basic' } = input
 
@@ -54,5 +51,10 @@ export class SearchTool extends StructuredTool {
     } catch (error) {
       throw new Error(`Failed to search: ${error instanceof Error ? error.message : String(error)}`)
     }
+  },
+  {
+    name: 'search',
+    description: 'Search the web for information using Tavily',
+    schema: searchInputSchema,
   }
-}
+)
