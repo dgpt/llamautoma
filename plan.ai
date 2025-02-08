@@ -342,3 +342,41 @@ for await (const step of stream) {
   console.log(step);
   console.log("\n");
 }
+
+### Diff Library Implementation
+1. Core Requirements:
+   - Accept compressed code or file paths as input
+   - Use functional composition for clean, maintainable code
+   - Leverage existing functionality (no new files)
+   - Follow test-driven development with Bun mocks
+
+2. Input Processing:
+   ```typescript
+   // Functional composition for input handling
+   const getContent = async (path?: string, content?: string): Promise<string> =>
+     path ? await getFile(path) : (content ?? '')
+
+   const decode = async (content: string): Promise<string> =>
+     content.startsWith('~') ? await decompressAndDecodeFile(content) : content
+   ```
+
+3. Diff Generation:
+   - Use fast-diff for generating diffs
+   - Compress/encode output using brotli
+   - Handle errors gracefully
+   - Return compressed diff output
+
+4. Testing Strategy:
+   - Use Bun mocks for dependencies
+   - Test both compressed and uncompressed inputs
+   - Test file path and direct content inputs
+   - Test error handling and edge cases
+
+## Coding Standards
+- **Functional Programming** → Prefer functional composition and pure functions
+- **Simplicity** → Implement the simplest possible solution
+- **Reusability** → Leverage existing code, avoid duplication
+- **Testing** → Use Bun mocks for dependency testing
+- **Compression** → Use brotli for file content compression
+- **Error Handling** → Handle errors gracefully at boundaries
+- **Documentation** → Document public APIs and complex logic

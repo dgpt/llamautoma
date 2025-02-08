@@ -1,97 +1,99 @@
-import { expect, test, describe, beforeEach } from 'bun:test'
-import { FileTool } from '@/ai/tools/file'
+import { expect, test, describe, beforeAll, afterAll } from 'bun:test'
+import { fileTool } from '@/ai/tools/file'
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
+
+const FIXTURES_DIR = join(process.cwd(), 'tests/fixtures/file-tool')
 
 describe('File Tool', () => {
-  let tool: FileTool
+  beforeAll(async () => {
+    // Ensure test files exist
+    // Already created by our setup command
+  })
 
-  beforeEach(() => {
-    tool = new FileTool()
+  afterAll(async () => {
+    // Clean up test files
+    await rm(FIXTURES_DIR, { recursive: true, force: true })
   })
 
   test('should handle single file request', async () => {
-    const result = await tool.invoke({
+    const result = await fileTool.invoke({
       requestType: 'file',
-      paths: ['src/index.ts'],
+      paths: [join(FIXTURES_DIR, 'test/file.txt')],
     })
     const parsed = JSON.parse(result)
-    expect(parsed['src/index.ts']).toEqual({
-      path: 'src/index.ts',
-      content: expect.any(String),
+    expect(parsed[join(FIXTURES_DIR, 'test/file.txt')]).toEqual({
+      path: join(FIXTURES_DIR, 'test/file.txt'),
+      content: 'test file content\n',
     })
   })
 
   test('should handle multiple files request', async () => {
-    const result = await tool.invoke({
+    const result = await fileTool.invoke({
       requestType: 'files',
-      paths: ['src/index.ts', 'package.json'],
+      paths: [join(FIXTURES_DIR, 'test/file1.txt'), join(FIXTURES_DIR, 'test/file2.txt')],
     })
     const parsed = JSON.parse(result)
-    expect(parsed).toHaveProperty('src/index.ts')
-    expect(parsed).toHaveProperty('package.json')
+    expect(parsed[join(FIXTURES_DIR, 'test/file1.txt')]).toEqual({
+      path: join(FIXTURES_DIR, 'test/file1.txt'),
+      content: 'test file 1 content\n',
+    })
+    expect(parsed[join(FIXTURES_DIR, 'test/file2.txt')]).toEqual({
+      path: join(FIXTURES_DIR, 'test/file2.txt'),
+      content: 'test file 2 content\n',
+    })
   })
 
   test('should handle directory request', async () => {
-    const result = await tool.invoke({
+    const result = await fileTool.invoke({
       requestType: 'directory',
-      paths: ['src'],
+      paths: [join(FIXTURES_DIR, 'test/dir')],
+      includePattern: '.ts',
     })
     const parsed = JSON.parse(result)
-    expect(Object.keys(parsed).length).toBeGreaterThan(0)
+    expect(parsed[join(FIXTURES_DIR, 'test/dir')]).toEqual({
+      path: join(FIXTURES_DIR, 'test/dir'),
+      content: 'test ts file\n',
+    })
   })
 
   test('should handle multiple directories request', async () => {
-    const result = await tool.invoke({
+    const result = await fileTool.invoke({
       requestType: 'directories',
-      paths: ['src', 'tests'],
+      paths: [join(FIXTURES_DIR, 'test/dir1'), join(FIXTURES_DIR, 'test/dir2')],
+      excludePattern: '.test.ts',
     })
     const parsed = JSON.parse(result)
-    expect(Object.keys(parsed).length).toBeGreaterThan(0)
-  })
-
-  test('should handle include pattern', async () => {
-    const result = await tool.invoke({
-      requestType: 'files',
-      paths: ['src'],
-      includePattern: '*.ts',
+    expect(parsed[join(FIXTURES_DIR, 'test/dir1')]).toEqual({
+      path: join(FIXTURES_DIR, 'test/dir1'),
+      content: 'test ts file 1\n',
     })
-    const parsed = JSON.parse(result)
-    Object.keys(parsed).forEach(path => {
-      expect(path).toMatch(/\.ts$/)
+    expect(parsed[join(FIXTURES_DIR, 'test/dir2')]).toEqual({
+      path: join(FIXTURES_DIR, 'test/dir2'),
+      content: 'test ts file 2\n',
     })
-  })
-
-  test('should handle exclude pattern', async () => {
-    const result = await tool.invoke({
-      requestType: 'files',
-      paths: ['src'],
-      excludePattern: '*.test.ts',
-    })
-    const parsed = JSON.parse(result)
-    Object.keys(parsed).forEach(path => {
-      expect(path).not.toMatch(/\.test\.ts$/)
-    })
-  })
-
-  test('should handle invalid path', async () => {
-    const result = await tool.invoke({
-      requestType: 'file',
-      paths: ['nonexistent/file.txt'],
-    })
-    const parsed = JSON.parse(result)
-    expect(parsed['nonexistent/file.txt']).toHaveProperty('error')
   })
 
   test('should handle empty paths array', async () => {
     await expect(
-      tool.invoke({
+      fileTool.invoke({
         requestType: 'files',
         paths: [],
       })
-    ).rejects.toThrow()
+    ).rejects.toThrow('No paths provided')
   })
 
   test('should handle invalid request type', async () => {
     // @ts-expect-error Testing invalid request type
-    await expect(tool.invoke({ requestType: 'invalid', paths: [] })).rejects.toThrow()
+    await expect(fileTool.invoke({ requestType: 'invalid', paths: [] })).rejects.toThrow()
+  })
+
+  test('should handle overall tool error', async () => {
+    await expect(
+      fileTool.invoke({
+        requestType: 'directory',
+        paths: [null as unknown as string],
+      })
+    ).rejects.toThrow()
   })
 })

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
-import { getFiles } from '../../lib/file'
+import { getFile } from '@/lib/file'
 import { logger } from '@/logger'
 
 // Schema for file request types
@@ -19,11 +19,26 @@ const FileInputSchema = z.object({
 export const fileTool = tool(
   async (input: z.infer<typeof FileInputSchema>) => {
     try {
-      // Use core file library to get files
-      const files = await getFiles(input.paths, input.includePattern, input.excludePattern)
+      if (input.paths.length === 0) {
+        throw new Error('No paths provided')
+      }
+
+      // Process each path
+      const results: Record<string, { path: string; content?: string; error?: string }> = {}
+
+      for (const path of input.paths) {
+        try {
+          // Request file content from client
+          const content = await getFile(path)
+          results[path] = { path, content }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          results[path] = { path, error: message }
+        }
+      }
 
       // Return files as JSON string for LLM consumption
-      return JSON.stringify(files, null, 2)
+      return JSON.stringify(results, null, 2)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logger.error({ error }, 'File tool error')
@@ -32,7 +47,7 @@ export const fileTool = tool(
   },
   {
     name: 'file',
-    description: 'Read files and directories from the workspace',
+    description: 'Read files and directories from the client',
     schema: FileInputSchema,
   }
 )
