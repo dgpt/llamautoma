@@ -115,6 +115,73 @@ export class Stream extends EventEmitter {
       reader.releaseLock()
     }
   }
+
+  /**
+   * Create a transform stream for handling SSE data
+   */
+  private createTransformStream(encoder: TextEncoder): TransformStream<string, Uint8Array> {
+    return new TransformStream({
+      transform(chunk, controller) {
+        controller.enqueue(encoder.encode(`data: ${chunk}\n\n`))
+      },
+    })
+  }
+
+  /**
+   * Create a streaming response handler
+   * This abstracts the common logic for handling streaming responses
+   */
+  createStreamHandler<T>(generator: AsyncIterable<T>, onError?: (error: Error) => void): Response {
+    const encoder = new TextEncoder()
+    const transformStream = this.createTransformStream(encoder)
+    const { readable, writable } = transformStream
+
+    // Create response with initial headers
+    const response = new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      },
+    })
+
+    // Start streaming
+    const writer = writable.getWriter()
+    this.pipeToWriter(writer, generator, onError)
+
+    return response
+  }
+
+  /**
+   * Pipe an async generator to a writer with error handling
+   */
+  private async pipeToWriter<T>(
+    writer: WritableStreamDefaultWriter<string>,
+    generator: AsyncIterable<T>,
+    onError?: (error: Error) => void
+  ): Promise<void> {
+    try {
+      // Write start event
+      await writer.write(
+        compressAndEncodeMessage({
+          event: 'start',
+          timestamp: Date.now(),
+        })
+      )
+
+      // Stream the data
+      for await (const chunk of this.streamToClient(generator)) {
+        await writer.write(chunk)
+      }
+    } catch (error) {
+      logger.error('Stream error:', error)
+      if (onError) {
+        onError(error instanceof Error ? error : new Error(String(error)))
+      }
+    } finally {
+      await writer.close()
+    }
+  }
 }
 
 // Export singleton instance

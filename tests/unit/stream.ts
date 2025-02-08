@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events'
 import { logger } from '@/logger'
-import { expect, test, describe, beforeEach } from 'bun:test'
+import { expect, test, describe, beforeEach, mock } from 'bun:test'
 import { Stream } from '@/stream'
 import { compressAndEncodeMessage, decodeAndDecompressMessage } from '@/lib/compression'
 import { StreamEvent } from '@/types/stream'
+import { llamautoma } from '@/ai'
 
 /**
  * Mock stream handler for tests
@@ -264,6 +265,174 @@ describe('Stream', () => {
       }
 
       expect(results).toHaveLength(0)
+    })
+  })
+
+  describe('Chat Request Handling', () => {
+    test('should handle chat request with streaming response', async () => {
+      const mockGenerator = async function* () {
+        yield {
+          type: 'response',
+          content: 'test1',
+          metadata: {},
+          timestamp: Date.now(),
+        }
+        yield {
+          type: 'response',
+          content: 'test2',
+          metadata: {},
+          timestamp: Date.now(),
+        }
+      }
+
+      // Mock llamautoma.stream
+      const originalStream = llamautoma.stream
+      llamautoma.stream = mock(() => mockGenerator())
+
+      const response = await streamHandler.handleChatRequest({ messages: [] }, 'test-thread')
+      expect(response).toBeInstanceOf(Response)
+      expect(response.headers.get('Content-Type')).toBe('text/event-stream')
+
+      const reader = response.body!.getReader()
+      const chunks: any[] = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              chunks.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(chunks[0].event).toBe('content')
+      expect(chunks[0].data.type).toBe('response')
+
+      // Restore original
+      llamautoma.stream = originalStream
+    })
+
+    test('should handle chat request errors', async () => {
+      // Mock llamautoma.stream to throw
+      const originalStream = llamautoma.stream
+      llamautoma.stream = mock(() => {
+        throw new Error('Test error')
+      })
+
+      const response = await streamHandler.handleChatRequest({ messages: [] }, 'test-thread')
+      expect(response).toBeInstanceOf(Response)
+
+      const reader = response.body!.getReader()
+      const chunks: any[] = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              chunks.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(chunks.some(c => c.type === 'error')).toBe(true)
+
+      // Restore original
+      llamautoma.stream = originalStream
+    })
+  })
+
+  describe('Sync Request Handling', () => {
+    test('should handle sync request with progress updates', async () => {
+      const response = await streamHandler.handleSyncRequest('test-thread')
+      expect(response).toBeInstanceOf(Response)
+      expect(response.headers.get('Content-Type')).toBe('text/event-stream')
+
+      const reader = response.body!.getReader()
+      const chunks: any[] = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              chunks.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(chunks.some(c => c.type === 'progress')).toBe(true)
+      expect(chunks.some(c => c.type === 'complete')).toBe(true)
+    })
+
+    test('should handle sync request errors', async () => {
+      // Mock emit to throw
+      const originalEmit = streamHandler.emit
+      streamHandler.emit = mock(() => {
+        throw new Error('Test error')
+      })
+
+      const response = await streamHandler.handleSyncRequest('test-thread')
+      expect(response).toBeInstanceOf(Response)
+
+      const reader = response.body!.getReader()
+      const chunks: any[] = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              chunks.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(chunks.some(c => c.type === 'error')).toBe(true)
+
+      // Restore original
+      streamHandler.emit = originalEmit
     })
   })
 })

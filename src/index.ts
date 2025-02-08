@@ -1,7 +1,42 @@
 import { Elysia } from 'elysia'
-import { stream } from './stream'
+import { stream, Stream } from './stream'
 import { llamautoma } from './ai'
 import { logger } from './logger'
+
+/**
+ * Create a generator for sync events
+ */
+async function* createSyncGenerator() {
+  // Emit progress
+  yield {
+    type: 'progress',
+    task: 'sync',
+    status: 'Starting workspace sync...',
+    timestamp: Date.now(),
+  }
+
+  // TODO: Implement sync logic here
+  // This is a placeholder that just emits a completion event
+  yield {
+    type: 'complete',
+    task: 'sync',
+    timestamp: Date.now(),
+  }
+}
+
+/**
+ * Handle stream errors by emitting error events
+ */
+function createErrorHandler(stream: Stream, task: string) {
+  return (error: Error) => {
+    stream.emit({
+      type: 'error',
+      task,
+      error: error.message,
+      timestamp: Date.now(),
+    })
+  }
+}
 
 const app = new Elysia()
 
@@ -11,32 +46,19 @@ app.derive(({ request }) => {
   return { acceptMsgPack }
 })
 
-app.post('/v1/chat', async ({ body, request, store }) => {
+// Chat endpoint
+app.post('/v1/chat', async ({ body, request }) => {
   const threadId = request.headers.get('X-Thread-ID') || 'default'
-  const response = stream.createResponse(threadId)
 
   try {
     const generator = llamautoma.stream(body, {
       configurable: { thread_id: threadId },
     })
 
-    const transformStream = new TransformStream()
-    const writer = transformStream.writable.getWriter()
-    const encoder = new TextEncoder()
-
-    // Create new response with transformed stream
-    const streamingResponse = new Response(transformStream.readable, {
-      headers: response.headers,
-    })
-
-    for await (const chunk of stream.streamToClient(generator)) {
-      writer.write(encoder.encode(`data: ${chunk}\n\n`))
-    }
-
-    writer.close()
-    return streamingResponse
+    return stream.createStreamHandler(generator, threadId, createErrorHandler(stream, 'chat'))
   } catch (error) {
     logger.error('Chat error:', error)
+    const response = stream.createResponse(threadId)
     stream.emit({
       type: 'error',
       task: 'chat',
@@ -47,39 +69,19 @@ app.post('/v1/chat', async ({ body, request, store }) => {
   }
 })
 
+// Sync endpoint
 app.post('/v1/sync', async ({ request }) => {
   const threadId = request.headers.get('X-Thread-ID') || 'default'
-  const response = stream.createResponse(threadId)
 
   try {
-    const transformStream = new TransformStream()
-    const writer = transformStream.writable.getWriter()
-
-    // Create new response with transformed stream
-    const streamingResponse = new Response(transformStream.readable, {
-      headers: response.headers,
-    })
-
-    // Emit progress
-    stream.emit({
-      type: 'progress',
-      task: 'sync',
-      status: 'Starting workspace sync...',
-      timestamp: Date.now(),
-    })
-
-    // TODO: Implement sync logic here
-    // This is a placeholder that just emits a completion event
-    stream.emit({
-      type: 'complete',
-      task: 'sync',
-      timestamp: Date.now(),
-    })
-
-    writer.close()
-    return streamingResponse
+    return stream.createStreamHandler(
+      createSyncGenerator(),
+      threadId,
+      createErrorHandler(stream, 'sync')
+    )
   } catch (error) {
     logger.error('Sync error:', error)
+    const response = stream.createResponse(threadId)
     stream.emit({
       type: 'error',
       task: 'sync',
