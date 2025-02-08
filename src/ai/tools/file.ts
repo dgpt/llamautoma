@@ -1,7 +1,8 @@
 import { z } from 'zod'
-import { tool } from '@langchain/core/tools'
-import { getFile } from '@/lib/file'
+import { tool, type ToolRunnableConfig } from '@langchain/core/tools'
+import { getFile, getDirectory } from '@/lib/file'
 import { logger } from '@/logger'
+import { DEFAULT_AGENT_CONFIG } from '@/types'
 
 // Schema for file request types
 const FileInputSchema = z.object({
@@ -17,7 +18,10 @@ const FileInputSchema = z.object({
 
 // Create the file tool using LangChain's tool function
 export const fileTool = tool(
-  async (input: z.infer<typeof FileInputSchema>) => {
+  async (
+    input: z.infer<typeof FileInputSchema>,
+    options?: ToolRunnableConfig<Record<string, any>>
+  ) => {
     try {
       if (input.paths.length === 0) {
         throw new Error('No paths provided')
@@ -26,11 +30,41 @@ export const fileTool = tool(
       // Process each path
       const results: Record<string, { path: string; content?: string; error?: string }> = {}
 
+      // Merge tool config with default config
+      const config = {
+        ...DEFAULT_AGENT_CONFIG,
+        ...(options?.configurable || {}),
+      }
+
       for (const path of input.paths) {
         try {
-          // Request file content from client
-          const content = await getFile(path)
-          results[path] = { path, content }
+          switch (input.requestType) {
+            case 'file':
+            case 'files': {
+              // Request file content from client
+              const content = await getFile(path, config)
+              results[path] = { path, content }
+              break
+            }
+            case 'directory':
+            case 'directories': {
+              // Request directory contents from client
+              const files = await getDirectory(
+                path,
+                config,
+                input.includePattern,
+                input.excludePattern
+              )
+              // Get first file's content as the representative content
+              const firstFile = Object.entries(files)[0]
+              if (firstFile) {
+                results[path] = { path, content: firstFile[1] }
+              } else {
+                results[path] = { path, error: 'No matching files found' }
+              }
+              break
+            }
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           results[path] = { path, error: message }

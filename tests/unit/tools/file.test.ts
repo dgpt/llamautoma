@@ -3,27 +3,15 @@ import { fileTool } from '@/ai/tools/file'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
-const FIXTURES_DIR = join(process.cwd(), 'tests/fixtures/file-tool')
-
 describe('File Tool', () => {
-  beforeAll(async () => {
-    // Ensure test files exist
-    // Already created by our setup command
-  })
-
-  afterAll(async () => {
-    // Clean up test files
-    await rm(FIXTURES_DIR, { recursive: true, force: true })
-  })
-
   test('should handle single file request', async () => {
     const result = await fileTool.invoke({
       requestType: 'file',
-      paths: [join(FIXTURES_DIR, 'test/file.txt')],
+      paths: ['test1.txt'],
     })
     const parsed = JSON.parse(result)
-    expect(parsed[join(FIXTURES_DIR, 'test/file.txt')]).toEqual({
-      path: join(FIXTURES_DIR, 'test/file.txt'),
+    expect(parsed['test1.txt']).toEqual({
+      path: 'test1.txt',
       content: 'test file content\n',
     })
   })
@@ -31,15 +19,15 @@ describe('File Tool', () => {
   test('should handle multiple files request', async () => {
     const result = await fileTool.invoke({
       requestType: 'files',
-      paths: [join(FIXTURES_DIR, 'test/file1.txt'), join(FIXTURES_DIR, 'test/file2.txt')],
+      paths: ['test1.txt', 'test2.txt'],
     })
     const parsed = JSON.parse(result)
-    expect(parsed[join(FIXTURES_DIR, 'test/file1.txt')]).toEqual({
-      path: join(FIXTURES_DIR, 'test/file1.txt'),
+    expect(parsed['test1.txt']).toEqual({
+      path: 'test1.txt',
       content: 'test file 1 content\n',
     })
-    expect(parsed[join(FIXTURES_DIR, 'test/file2.txt')]).toEqual({
-      path: join(FIXTURES_DIR, 'test/file2.txt'),
+    expect(parsed['test2.txt']).toEqual({
+      path: 'test2.txt',
       content: 'test file 2 content\n',
     })
   })
@@ -47,12 +35,12 @@ describe('File Tool', () => {
   test('should handle directory request', async () => {
     const result = await fileTool.invoke({
       requestType: 'directory',
-      paths: [join(FIXTURES_DIR, 'test/dir')],
+      paths: ['test/dir'],
       includePattern: '.ts',
     })
     const parsed = JSON.parse(result)
-    expect(parsed[join(FIXTURES_DIR, 'test/dir')]).toEqual({
-      path: join(FIXTURES_DIR, 'test/dir'),
+    expect(parsed['test/dir']).toEqual({
+      path: 'test/dir',
       content: 'test ts file\n',
     })
   })
@@ -60,16 +48,16 @@ describe('File Tool', () => {
   test('should handle multiple directories request', async () => {
     const result = await fileTool.invoke({
       requestType: 'directories',
-      paths: [join(FIXTURES_DIR, 'test/dir1'), join(FIXTURES_DIR, 'test/dir2')],
+      paths: ['test/dir1', 'test/dir2'],
       excludePattern: '.test.ts',
     })
     const parsed = JSON.parse(result)
-    expect(parsed[join(FIXTURES_DIR, 'test/dir1')]).toEqual({
-      path: join(FIXTURES_DIR, 'test/dir1'),
+    expect(parsed['test/dir1']).toEqual({
+      path: 'test/dir1',
       content: 'test ts file 1\n',
     })
-    expect(parsed[join(FIXTURES_DIR, 'test/dir2')]).toEqual({
-      path: join(FIXTURES_DIR, 'test/dir2'),
+    expect(parsed['test/dir2']).toEqual({
+      path: 'test/dir2',
       content: 'test ts file 2\n',
     })
   })
