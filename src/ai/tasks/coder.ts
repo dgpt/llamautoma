@@ -5,8 +5,8 @@ import { CoderTaskSchema, ReviewerTaskSchema } from './schemas/tasks'
 import { z } from 'zod'
 import { llm } from '../llm'
 import { getMessageString } from '../tasks/lib'
-import { updateProgress, sendTaskResponse, sendTaskComplete } from '../utils/stream'
-import { parseSections } from '../lib/parse'
+import { updateProgress, sendTaskResponse, sendTaskComplete } from '../../stream'
+import { parseSections } from '../../lib/parse'
 
 /**
  * Parses file sections into structured format

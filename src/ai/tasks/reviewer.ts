@@ -3,7 +3,7 @@ import { BaseMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { llm } from '../llm'
 import { getMessageString } from '../tasks/lib'
-import { updateProgress, sendTaskResponse, sendTaskComplete } from '../utils/stream'
+import { updateProgress, sendTaskResponse, sendTaskComplete } from '../../stream'
 import { ReviewerTaskSchema } from './schemas/tasks'
 
 /**

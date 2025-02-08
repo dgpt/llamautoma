@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
-import { streamToClient, waitForClientResponse } from '../utils/stream'
+import { streamToClient, waitForClientResponse } from '../../stream'
 import { logger } from '@/logger'
 
 // Schema for run command input

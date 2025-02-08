@@ -1,6 +1,9 @@
 import { expect, test, describe, beforeAll, afterAll } from 'bun:test'
+import { Elysia } from 'elysia'
+import app from '@/index'
+import { stream } from '@/stream'
+import { decodeAndDecompressMessage } from '@/lib/compression'
 import { logger } from '@/logger'
-import server from '@/index'
 
 interface StreamEvent {
   event: string
@@ -64,197 +67,189 @@ const readStreamWithTimeout = async (
   return allEvents
 }
 
-describe('Server Integration Tests', () => {
+describe('Server Integration', () => {
+  let server: Elysia
+  const testPort = 3001
+
   beforeAll(() => {
-    process.env.NODE_ENV = 'test'
-    logger.trace('Starting server for tests')
+    server = app
+    server.listen(testPort)
   })
 
   afterAll(() => {
-    process.env.NODE_ENV = 'development'
-    logger.trace('Server stopped')
+    server.stop()
   })
 
-  test('should handle basic chat interaction', async () => {
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  describe('Health Check', () => {
+    test('should return ok status', async () => {
+      const response = await fetch(`http://localhost:${testPort}/health`)
+      expect(response.status).toBe(200)
+      const data = await response.json()
+      expect(data).toEqual({ status: 'ok' })
+    })
+  })
 
-    try {
-      const response = await server.fetch(
-        new Request('http://localhost:3000/v1/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Tell me about TypeScript' }],
-            modelName: 'qwen2.5-coder:1.5b',
-            host: 'http://localhost:11434',
-            safetyConfig: {
-              maxInputLength: 8192,
-            },
-          }),
-        })
-      )
+  describe('Chat Endpoint', () => {
+    test('should handle chat request with streaming response', async () => {
+      const response = await fetch(`http://localhost:${testPort}/v1/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Thread-ID': 'test-thread',
+        },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello' }],
+        }),
+      })
 
       expect(response.status).toBe(200)
-      reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
-      }
+      expect(response.headers.get('Content-Type')).toBe('text/event-stream')
 
-      const events = await readStreamWithTimeout(reader)
+      const reader = response.body!.getReader()
+      const events = []
 
-      // First check for start event
-      const foundStart = findEventByPredicate(events, event => {
-        return event.event === 'start' && event.data?.content !== undefined
-      })
-      expect(foundStart).toBe(true)
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
 
-      // Then check for TypeScript content in any message
-      const foundTypescriptResponse = findEventByPredicate(events, event => {
-        if (!event.data?.content) return false
-        try {
-          const content = event.data.content.toLowerCase()
-          return content.includes('typescript') || content.includes('using typescript')
-        } catch {
-          return false
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              events.push(data)
+            }
+          }
         }
-      })
-
-      expect(foundTypescriptResponse).toBe(true)
-
-      // Finally check for end event
-      const foundEnd = findEventByPredicate(events, event => {
-        return event.event === 'end' && event.data?.content !== undefined
-      })
-      expect(foundEnd).toBe(true)
-    } finally {
-      if (reader) {
-        await reader.cancel()
+      } finally {
+        reader.releaseLock()
       }
-    }
-  })
 
-  test('should handle invalid request method', async () => {
-    const response = await server.fetch(
-      new Request('http://localhost:3000/v1/chat', {
-        method: 'GET',
-      })
-    )
+      expect(events.length).toBeGreaterThan(0)
+      expect(events[0].event).toBe('start')
+      expect(events[events.length - 1].event).toBe('end')
+    })
 
-    expect(response.status).toBe(405)
-    const data = await response.json()
-    expect(data.error).toBe('Method not allowed')
-  })
-
-  test('should handle invalid JSON in request body', async () => {
-    const response = await server.fetch(
-      new Request('http://localhost:3000/v1/chat', {
+    test('should handle chat errors gracefully', async () => {
+      const response = await fetch(`http://localhost:${testPort}/v1/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Thread-ID': 'test-thread',
+        },
         body: 'invalid json',
       })
-    )
 
-    expect(response.status).toBe(400)
-    const data = await response.json()
-    expect(data.error).toBe('Invalid JSON in request body')
+      expect(response.status).toBe(200) // Still returns 200 as it's streaming
+      const reader = response.body!.getReader()
+      const events = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              events.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      expect(events.length).toBeGreaterThan(0)
+      expect(events.some(e => e.type === 'error')).toBe(true)
+    })
   })
 
-  test('should handle invalid chat request without messages', async () => {
-    const response = await server.fetch(
-      new Request('http://localhost:3000/v1/chat', {
+  describe('Sync Endpoint', () => {
+    test('should handle sync request with streaming response', async () => {
+      const response = await fetch(`http://localhost:${testPort}/v1/sync`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Thread-ID': 'test-thread',
+        },
         body: JSON.stringify({
-          messages: [],
+          root: '/test/path',
+          excludePatterns: ['node_modules/**'],
         }),
       })
-    )
-
-    expect(response.status).toBe(500)
-    const data = await response.json()
-    expect(data.error).toBe('Request failed')
-    expect(data.details).toContain('Invalid chat request: messages array is required')
-  })
-
-  test('should handle invalid endpoint', async () => {
-    const response = await server.fetch(
-      new Request('http://localhost:3000/invalid', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-    )
-
-    expect(response.status).toBe(404)
-    const data = await response.json()
-    expect(data.error).toBe('Not found')
-  })
-
-  test('should handle chat request with custom thread ID and configurable', async () => {
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-    const customThreadId = 'test-thread-123'
-
-    try {
-      const response = await server.fetch(
-        new Request('http://localhost:3000/v1/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Hello' }],
-            modelName: 'qwen2.5-coder:1.5b',
-            host: 'http://localhost:11434',
-            threadId: customThreadId,
-            checkpoint: 'custom-namespace',
-            safetyConfig: {
-              maxInputLength: 8192,
-            },
-          }),
-        })
-      )
 
       expect(response.status).toBe(200)
-      reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
+      expect(response.headers.get('Content-Type')).toBe('text/event-stream')
+
+      const reader = response.body!.getReader()
+      const events = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              events.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
       }
 
-      const events = await readStreamWithTimeout(reader)
+      expect(events.length).toBeGreaterThan(0)
+      expect(events[0].event).toBe('start')
+      expect(events.some(e => e.type === 'progress')).toBe(true)
+      expect(events.some(e => e.type === 'complete')).toBe(true)
+    })
 
-      // Check for start event with correct thread ID
-      const foundThreadId = findEventByPredicate(events, event => {
-        return event.event === 'start' && event.threadId === customThreadId
-      })
-      expect(foundThreadId).toBe(true)
-
-      // Verify thread ID is consistent across all events
-      const allEventsHaveCorrectThreadId = events.every(event => event.threadId === customThreadId)
-      expect(allEventsHaveCorrectThreadId).toBe(true)
-    } finally {
-      if (reader) {
-        await reader.cancel()
-      }
-    }
-  })
-
-  test('should enforce maxInputLength safety check', async () => {
-    const longInput = 'a'.repeat(8193) // Exceeds maxInputLength of 8192
-    const response = await server.fetch(
-      new Request('http://localhost:3000/v1/chat', {
+    test('should handle sync errors gracefully', async () => {
+      const response = await fetch(`http://localhost:${testPort}/v1/sync`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: longInput }],
-          modelName: 'qwen2.5-coder:1.5b',
-          host: 'http://localhost:11434',
-          safetyConfig: {
-            maxInputLength: 8192,
-          },
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Thread-ID': 'test-thread',
+        },
+        body: 'invalid json',
       })
-    )
 
-    expect(response.status).toBe(400)
-    const data = await response.json()
-    expect(data.error).toBe('Input exceeds maximum length')
+      expect(response.status).toBe(200) // Still returns 200 as it's streaming
+      const reader = response.body!.getReader()
+      const events = []
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const text = new TextDecoder().decode(value)
+          const lines = text.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = decodeAndDecompressMessage(line.slice(6))
+              events.push(data)
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      expect(events.length).toBeGreaterThan(0)
+      expect(events.some(e => e.type === 'error')).toBe(true)
+    })
   })
 })

@@ -1,223 +1,101 @@
-import { startTimer, endTimer, logUserInput, logAgentResponse, logError } from '@/logger'
-import { llamautoma } from '@/ai'
-import { FileTool } from '@/ai/tools/file'
-import { ChatRequestSchema, SyncRequestSchema, ChatRequest, SyncRequest } from '@/types'
+import { Elysia } from 'elysia'
+import { stream } from './stream'
+import { llamautoma } from './ai'
+import { logger } from './logger'
 
-// Helper to create error responses
-const createErrorResponse = (status: number, error: string, details?: string) => {
-  return new Response(
-    JSON.stringify({
-      error,
-      details,
-    }),
-    {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    }
-  )
-}
+const app = new Elysia()
 
-// Helper to create streaming response
-const createStreamingResponse = (threadId: string, content: string) => {
-  const encoder = new TextEncoder()
-  const stream = new ReadableStream({
-    start(controller) {
-      // Send start event
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            event: 'start',
-            threadId,
-            data: { content },
-          })}\n\n`
-        )
-      )
+// Add middleware to handle compression
+app.derive(({ request }) => {
+  const acceptMsgPack = request.headers.get('Accept') === 'application/x-msgpack'
+  return { acceptMsgPack }
+})
 
-      // Send content event
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            event: 'content',
-            threadId,
-            data: { content },
-          })}\n\n`
-        )
-      )
-
-      // Send end event
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            event: 'end',
-            threadId,
-            data: { content },
-          })}\n\n`
-        )
-      )
-
-      controller.close()
-    },
-  })
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
-  })
-}
-
-// Handler for chat requests
-const handleChatRequest = async (body: ChatRequest): Promise<Response> => {
-  // Validate request body
-  const result = ChatRequestSchema.safeParse(body)
-
-  if (!result.success) {
-    const errorMessage = 'Invalid chat request: messages array is required'
-    logError('validation-error', errorMessage)
-    return createErrorResponse(500, 'Request failed', errorMessage)
-  }
-
-  startTimer('request')
-  const { messages, threadId = Bun.randomUUIDv7() } = result.data
-
-  // Log user input
-  const lastUserMessage = messages[messages.length - 1]
-  logUserInput(lastUserMessage.content)
+app.post('/v1/chat', async ({ body, request, store }) => {
+  const threadId = request.headers.get('X-Thread-ID') || 'default'
+  const response = stream.createResponse(threadId)
 
   try {
-    // Process chat request
-    const response = await llamautoma.invoke({
-      messages,
-      threadId,
+    const generator = llamautoma.stream(body, {
+      configurable: { thread_id: threadId },
     })
 
-    const elapsedMs = endTimer('request')
-    logAgentResponse('chat', response.metadata?.messages?.at(-1)?.content || '', elapsedMs)
-
-    return createStreamingResponse(threadId, response.metadata?.messages?.at(-1)?.content || '')
-  } catch (error) {
-    logError('chat-error', error instanceof Error ? error.message : String(error))
-    return createErrorResponse(
-      500,
-      'Request failed',
-      error instanceof Error ? error.message : String(error)
-    )
-  }
-}
-
-// Handler for sync requests
-const handleSyncRequest = async (body: SyncRequest): Promise<Response> => {
-  // Validate request body
-  const result = SyncRequestSchema.safeParse(body)
-
-  if (!result.success) {
-    const errorMessage = 'Invalid sync request: root path is required'
-    return createErrorResponse(500, 'Request failed', errorMessage)
-  }
-
-  const { root, excludePatterns = ['node_modules/**', 'dist/**', '.git/**'] } = result.data
-  const threadId = result.data.threadId || Bun.randomUUIDv7()
-
-  try {
-    // Create file tool instance
-    const fileTool = new FileTool()
-
-    // Request all files in workspace
-    const response = await fileTool.invoke({
-      requestType: 'directory',
-      paths: [root],
-      includePattern: '**/*',
-      excludePattern: excludePatterns.join('|'),
-    })
-
-    // Create a streaming response
+    const transformStream = new TransformStream()
+    const writer = transformStream.writable.getWriter()
     const encoder = new TextEncoder()
-    const stream = new ReadableStream({
-      start(controller) {
-        // Send start event
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              event: 'start',
-              threadId,
-              data: { status: 'syncing' },
-            })}\n\n`
-          )
-        )
 
-        // Send file data
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              event: 'content',
-              threadId,
-              data: { files: JSON.parse(response) },
-            })}\n\n`
-          )
-        )
-
-        // Send end event
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              event: 'end',
-              threadId,
-              data: { status: 'complete' },
-            })}\n\n`
-          )
-        )
-
-        controller.close()
-      },
+    // Create new response with transformed stream
+    const streamingResponse = new Response(transformStream.readable, {
+      headers: response.headers,
     })
 
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      },
-    })
+    for await (const chunk of stream.streamToClient(generator)) {
+      writer.write(encoder.encode(`data: ${chunk}\n\n`))
+    }
+
+    writer.close()
+    return streamingResponse
   } catch (error) {
-    logError('sync-error', error instanceof Error ? error.message : String(error))
-    return createErrorResponse(
-      500,
-      'Request failed',
-      error instanceof Error ? error.message : String(error)
-    )
+    logger.error('Chat error:', error)
+    stream.emit({
+      type: 'error',
+      task: 'chat',
+      error: error instanceof Error ? error.message : String(error),
+      timestamp: Date.now(),
+    })
+    return response
   }
-}
+})
 
-// Main request handler
-const handleRequest = async (req: Request): Promise<Response> => {
-  const url = new URL(req.url)
+app.post('/v1/sync', async ({ request }) => {
+  const threadId = request.headers.get('X-Thread-ID') || 'default'
+  const response = stream.createResponse(threadId)
 
-  // Validate request method
-  if (req.method !== 'POST') {
-    return createErrorResponse(405, 'Method not allowed')
-  }
-
-  // Parse request body
-  let body: unknown
   try {
-    const text = await req.text()
-    body = JSON.parse(text)
+    const transformStream = new TransformStream()
+    const writer = transformStream.writable.getWriter()
+
+    // Create new response with transformed stream
+    const streamingResponse = new Response(transformStream.readable, {
+      headers: response.headers,
+    })
+
+    // Emit progress
+    stream.emit({
+      type: 'progress',
+      task: 'sync',
+      status: 'Starting workspace sync...',
+      timestamp: Date.now(),
+    })
+
+    // TODO: Implement sync logic here
+    // This is a placeholder that just emits a completion event
+    stream.emit({
+      type: 'complete',
+      task: 'sync',
+      timestamp: Date.now(),
+    })
+
+    writer.close()
+    return streamingResponse
   } catch (error) {
-    logError('parse-error', 'Failed to parse request body')
-    return createErrorResponse(400, 'Invalid JSON in request body')
+    logger.error('Sync error:', error)
+    stream.emit({
+      type: 'error',
+      task: 'sync',
+      error: error instanceof Error ? error.message : String(error),
+      timestamp: Date.now(),
+    })
+    return response
   }
+})
 
-  // Handle request based on endpoint
-  switch (url.pathname) {
-    case '/v1/chat':
-      return await handleChatRequest(body as ChatRequest)
-    case '/v1/sync':
-      return await handleSyncRequest(body as SyncRequest)
-    default:
-      return createErrorResponse(404, 'Not found')
-  }
-}
+// Health check endpoint
+app.get('/health', () => ({ status: 'ok' }))
 
-export default { port: 3000, fetch: handleRequest }
+// Start server
+const port = process.env.PORT ? parseInt(process.env.PORT) : 3000
+app.listen(port)
+logger.info(`Server running on port ${port}`)
+
+export default app

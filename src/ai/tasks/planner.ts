@@ -4,7 +4,7 @@ import { RunnableConfig } from '@langchain/core/runnables'
 import { PlannerTaskSchema } from './schemas/tasks'
 import { llm } from '../llm'
 import { getMessageString } from './lib'
-import { updateProgress, sendTaskResponse } from '../utils/stream'
+import { updateProgress, sendTaskResponse } from '../../stream'
 
 /**
  * Creates a plan for code generation based on user request

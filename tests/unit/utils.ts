@@ -94,3 +94,24 @@ export async function runWithTestConfig<T>(task: any, input: any): Promise<T> {
   })
   return result as T
 }
+
+// Mock file system for tests
+export const mockFileSystem = new Map<string, string>()
+
+// Mock stream functions for tests
+export const streamToClient = async (request: any): Promise<void> => {
+  // For tests, we'll just store the request
+  mockFileSystem.set('lastRequest', JSON.stringify(request))
+}
+
+export const waitForClientResponse = async <T>(): Promise<T> => {
+  // For tests, we'll return a file complete response
+  return {
+    type: 'file_complete',
+  } as T
+}
+
+// Mock file tool response for tests
+export const mockFileToolResponse = (path: string, content: string): void => {
+  mockFileSystem.set(path, content)
+}

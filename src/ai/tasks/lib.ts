@@ -1,5 +1,5 @@
 import { BaseMessage } from '@langchain/core/messages'
-import { encodeGeneratedFiles, decodeGeneratedFiles } from '../lib/compression'
+import { encodeGeneratedFiles, decodeGeneratedFiles } from '../../lib/compression'
 import { z } from 'zod'
 import { Tool } from '@langchain/core/tools'
 import { ToolNode as LangGraphToolNode } from '@langchain/langgraph/prebuilt'

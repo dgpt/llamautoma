@@ -24,7 +24,9 @@
     "outDir": "dist",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@/tests/*": ["tests/*"],
+      "@/mocks/*": ["tests/mocks/*"]
     },
     "esModuleInterop": true,
     "resolveJsonModule": true,

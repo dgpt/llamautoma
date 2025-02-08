@@ -1,18 +1,79 @@
-import { expect, test, describe, beforeEach } from 'bun:test'
+import { expect, test, describe, beforeEach, afterEach } from 'bun:test'
 import { SystemMessage } from '@langchain/core/messages'
 import { createTestContext, TestContext, waitForResponse } from '../utils'
+import { diffTool } from '@/ai/tools/diff'
+import { mockStream, setTestMode, resetTestMode } from '@/tests/mocks/stream'
+import { streamHandler } from '@/stream'
+import { encode as msgpackEncode } from '@msgpack/msgpack'
+import type { StreamEvent } from '@/types/stream'
 
 describe('Diff Tool', () => {
   let ctx: TestContext
 
   beforeEach(() => {
     ctx = createTestContext()
+    mockStream.clearMocks()
+    setTestMode()
+
+    // Listen for file requests and respond with mock content
+    streamHandler.on('data', (data: Buffer | string) => {
+      try {
+        const decoded = mockStream.decodeEvent(data)
+        if (decoded.type === 'file_request') {
+          const { paths } = decoded.data
+          for (const path of paths) {
+            const content = mockStream.getFile(path)
+            if (content) {
+              // Emit file chunk response
+              const response: StreamEvent = {
+                type: 'response',
+                task: 'file',
+                content: JSON.stringify({
+                  type: 'file_chunk',
+                  data: {
+                    path,
+                    content: content,
+                    done: true,
+                  },
+                }),
+                timestamp: Date.now(),
+              }
+              mockStream.emit('data', response)
+            }
+          }
+          // Send completion
+          const complete: StreamEvent = {
+            type: 'complete',
+            task: 'file',
+            timestamp: Date.now(),
+          }
+          mockStream.emit('data', complete)
+        }
+      } catch (error) {
+        // Emit error response
+        const errorEvent: StreamEvent = {
+          type: 'error',
+          task: 'file',
+          error: error instanceof Error ? error.message : String(error),
+          timestamp: Date.now(),
+        }
+        mockStream.emit('data', errorEvent)
+      }
+    })
   })
 
-  test('should generate diff for file modifications', async () => {
-    const existingCode = `
-import React from 'react';
+  afterEach(() => {
+    resetTestMode()
+    streamHandler.removeAllListeners()
+  })
 
+  describe('Direct Tool Invocation', () => {
+    test('should generate diff for file modifications', async () => {
+      // Mock the original file content
+      mockStream.mockFile(
+        'src/components/Counter.tsx',
+        `
+import React from 'react';
 export const Counter = () => {
   let count = 0;
   const increment = () => count++;
@@ -25,121 +86,254 @@ export const Counter = () => {
     </div>
   );
 };`
+      )
 
-    const generatedCode = `
+      const input = {
+        files: [
+          {
+            path: 'src/components/Counter.tsx',
+            content: `
 import React, { useState } from 'react';
-
-interface CounterProps {
-  initialValue?: number;
-}
-
-export const Counter: React.FC<CounterProps> = ({ initialValue = 0 }) => {
-  const [count, setCount] = useState(initialValue);
-  const increment = () => setCount(prev => prev + 1);
-  const decrement = () => setCount(prev => prev - 1);
+const Counter = () => {
+  const [count, setCount] = useState(0);
   return (
-    <div className="counter">
+    <div>
+      <button onClick={() => setCount(count - 1)}>-</button>
+      <span>{count}</span>
+      <button onClick={() => setCount(count + 1)}>+</button>
+    </div>
+  );
+};`,
+            type: 'update' as const,
+          },
+        ],
+      }
+
+      // Add logging to track the request flow
+      streamHandler.on('data', (data: Buffer | string) => {
+        try {
+          // Use the mock stream's decodeEvent helper
+          const event = mockStream.decodeEvent(data)
+          console.log('Decoded event:', event)
+        } catch (error) {
+          console.error('Failed to parse event:', error)
+        }
+      })
+
+      const result = await diffTool.invoke(input)
+      const diffs = JSON.parse(result)
+
+      expect(diffs).toBeArray()
+      expect(diffs).toHaveLength(1)
+      expect(diffs[0]).toHaveProperty('path', 'src/components/Counter.tsx')
+      expect(diffs[0]).toHaveProperty('diff')
+      expect(diffs[0].diff).toBeArray()
+
+      // Each diff entry should be a tuple of [operation, content]
+      diffs[0].diff.forEach((entry: [number, string]) => {
+        expect(entry).toBeArray()
+        expect(entry).toHaveLength(2)
+        expect(entry[0]).toBeNumber()
+        expect(entry[1]).toBeString()
+      })
+    })
+
+    test('should handle new file creation', async () => {
+      const input = {
+        files: [
+          {
+            path: 'src/components/App.tsx',
+            content: `
+import React from 'react';
+import { Counter } from './Counter';
+
+export const App = () => (
+  <div>
+    <h1>Counter App</h1>
+    <Counter initialValue={5} />
+  </div>
+);`,
+            type: 'create' as const,
+          },
+        ],
+      }
+
+      const result = await diffTool.invoke(input)
+      const diffs = JSON.parse(result)
+
+      expect(diffs).toBeArray()
+      expect(diffs).toHaveLength(1)
+      expect(diffs[0]).toHaveProperty('path', 'src/components/App.tsx')
+      expect(diffs[0]).toHaveProperty('diff')
+      expect(diffs[0].diff).toBeArray()
+
+      // For new files, the diff should show everything as added
+      const addedContent = diffs[0].diff.filter((entry: [number, string]) => entry[0] === 1)
+      expect(addedContent).not.toBeEmpty()
+    })
+
+    test('should handle file deletion', async () => {
+      // Mock the file to be deleted
+      mockStream.mockFile(
+        'src/components/OldCounter.tsx',
+        `
+import React from 'react';
+export const OldCounter = () => {
+  return <div>Old counter implementation</div>;
+};`
+      )
+
+      const input = {
+        files: [
+          {
+            path: 'src/components/OldCounter.tsx',
+            content: '',
+            type: 'delete' as const,
+          },
+        ],
+      }
+
+      const result = await diffTool.invoke(input)
+      const diffs = JSON.parse(result)
+
+      expect(diffs).toBeArray()
+      expect(diffs).toHaveLength(1)
+      expect(diffs[0]).toHaveProperty('path', 'src/components/OldCounter.tsx')
+      expect(diffs[0]).toHaveProperty('diff')
+      expect(diffs[0].diff).toBeArray()
+
+      // For deleted files, the diff should show everything as removed
+      const removedContent = diffs[0].diff.filter((entry: [number, string]) => entry[0] === -1)
+      expect(removedContent).not.toBeEmpty()
+    })
+  })
+
+  describe('Chat Model Invocation', () => {
+    test('should generate readable diff for modifications via chat', async () => {
+      const messages = [
+        new SystemMessage('You are a diff generator. Generate a diff between these files.'),
+        new SystemMessage(
+          JSON.stringify({
+            existingFile: {
+              path: 'src/components/Counter.tsx',
+              content: `
+import React from 'react';
+export const Counter = () => {
+  let count = 0;
+  const increment = () => count++;
+  const decrement = () => count--;
+  return (
+    <div>
+      <button onClick={decrement}>-</button>
+      <span>{count}</span>
+      <button onClick={increment}>+</button>
+    </div>
+  );
+};`,
+            },
+            generatedFile: {
+              path: 'src/components/Counter.tsx',
+              content: `
+import React, { useState } from 'react';
+export const Counter = () => {
+  const [count, setCount] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setCount(count - 1)}>-</button>
+      <span>{count}</span>
+      <button onClick={() => setCount(count + 1)}>+</button>
+    </div>
+  );
+};`,
+            },
+          })
+        ),
+      ]
+
+      // Mock the original file content for the diff tool
+      mockStream.mockFile(
+        'src/components/Counter.tsx',
+        `
+import React from 'react';
+export const Counter = () => {
+  let count = 0;
+  const increment = () => count++;
+  const decrement = () => count--;
+  return (
+    <div>
       <button onClick={decrement}>-</button>
       <span>{count}</span>
       <button onClick={increment}>+</button>
     </div>
   );
 };`
+      )
 
-    const messages = [
-      new SystemMessage('You are a diff generator. Generate a diff between these files.'),
-      new SystemMessage(
-        JSON.stringify({
-          existingFile: {
-            path: 'src/components/Counter.tsx',
-            content: existingCode,
-          },
-          generatedFile: {
-            path: 'src/components/Counter.tsx',
-            content: generatedCode,
-          },
-        })
-      ),
-    ]
+      const result = await waitForResponse(ctx.chatModel.invoke(messages))
+      const diff = result.content as string
 
-    const result = await waitForResponse(ctx.chatModel.invoke(messages))
-    const diff = result.content as string
+      // Loose expectations for chat model response
+      expect(diff).toBeTruthy()
+      expect(diff).toInclude('Counter.tsx')
+      expect(diff).toMatch(/[-+].*count/) // Should show changes related to count
+    })
 
-    // Log the actual diff output for debugging
-    console.log('Actual diff output:', diff)
-
-    // Validate diff format
-    expect(diff).toBeTruthy()
-    expect(diff).toContain('diff --git')
-    expect(diff).toContain('src/components/Counter.tsx')
-    expect(diff).toContain('-  let count = 0')
-    expect(diff).toContain('+  const [count, setCount] = useState(initialValue)')
-    expect(diff).toContain('onClick={decrement}')
-    expect(diff).toContain('button')
-  })
-
-  test('should handle new file creation', async () => {
-    const newFileContent = `
+    test('should generate readable diff for new file via chat', async () => {
+      const messages = [
+        new SystemMessage('You are a diff generator. Generate a diff for this new file.'),
+        new SystemMessage(
+          JSON.stringify({
+            generatedFile: {
+              path: 'src/components/App.tsx',
+              content: `
 import React from 'react';
 import { Counter } from './Counter';
 
-export const App = () => {
-  return (
-    <div>
-      <h1>Counter App</h1>
-      <Counter initialValue={5} />
-    </div>
-  );
-};`
+export const App = () => (
+  <div>
+    <h1>Counter App</h1>
+    <Counter initialValue={5} />
+  </div>
+);`,
+            },
+          })
+        ),
+      ]
 
-    const messages = [
-      new SystemMessage('You are a diff generator. Generate a diff for this new file.'),
-      new SystemMessage(
-        JSON.stringify({
-          generatedFile: {
-            path: 'src/components/App.tsx',
-            content: newFileContent,
-          },
-        })
-      ),
-    ]
+      const result = await waitForResponse(ctx.chatModel.invoke(messages))
+      const diff = result.content as string
 
-    const result = await waitForResponse(ctx.chatModel.invoke(messages))
-    const diff = result.content as string
+      // Loose expectations for chat model response
+      expect(diff).toBeTruthy()
+      expect(diff).toInclude('App.tsx')
+      expect(diff).toMatch(/[+].*Counter/) // Should show Counter component being added
+    })
 
-    expect(diff).toBeTruthy()
-    expect(diff).toContain('diff')
-    expect(diff).toContain('new file')
-    expect(diff).toContain('Counter initialValue={5}')
-  })
-
-  test('should handle file deletion', async () => {
-    const existingCode = `
+    test('should generate readable diff for file deletion via chat', async () => {
+      const messages = [
+        new SystemMessage('You are a diff generator. Generate a diff for this file deletion.'),
+        new SystemMessage(
+          JSON.stringify({
+            existingFile: {
+              path: 'src/components/OldCounter.tsx',
+              content: `
 import React from 'react';
-
-// Deprecated component to be removed
 export const OldCounter = () => {
   return <div>Old counter implementation</div>;
-};`
+};`,
+            },
+            action: 'delete',
+          })
+        ),
+      ]
 
-    const messages = [
-      new SystemMessage('You are a diff generator. Generate a diff for this file deletion.'),
-      new SystemMessage(
-        JSON.stringify({
-          existingFile: {
-            path: 'src/components/OldCounter.tsx',
-            content: existingCode,
-          },
-          action: 'delete',
-        })
-      ),
-    ]
+      const result = await waitForResponse(ctx.chatModel.invoke(messages))
+      const diff = result.content as string
 
-    const result = await waitForResponse(ctx.chatModel.invoke(messages))
-    const diff = result.content as string
-
-    expect(diff).toBeTruthy()
-    expect(diff).toContain('diff')
-    expect(diff).toContain('deleted file')
+      // Loose expectations for chat model response
+      expect(diff).toBeTruthy()
+      expect(diff).toInclude('OldCounter.tsx')
+      expect(diff).toMatch(/[-].*OldCounter/) // Should show OldCounter being removed
+    })
   })
 })

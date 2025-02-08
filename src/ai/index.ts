@@ -21,7 +21,9 @@ import { getMessageString } from './tasks/lib'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { MemorySaver } from '@langchain/langgraph/prebuilt'
 import { TaskTypeSchema } from './tasks/schemas/tasks'
-import { StreamHandler } from './utils/stream'
+import { StreamHandler } from '../stream'
+import { generateCompressedDiffs } from '../lib/diff'
+import { compressAndEncodeMessage } from '../lib/compression'
 
 // Convert Message to BaseMessage
 function toBaseMessage(msg: Message): BaseMessage {
@@ -153,6 +155,9 @@ const workflow = entrypoint(
       config
     )
 
+    // Generate compressed diffs for client
+    const compressedDiffs = await generateCompressedDiffs(codeResult.files)
+
     // Review code
     let codeReviewResult = await reviewerTask.invoke(
       {
@@ -189,16 +194,23 @@ const workflow = entrypoint(
       attempts++
     }
 
-    return {
+    // Prepare response for client
+    const response = {
       type: 'code',
       messages,
       plan: planResult,
-      code: codeResult,
+      code: {
+        ...codeResult,
+        diffs: compressedDiffs,
+      },
       reviews: {
         plan: planReviewResult,
         code: codeReviewResult,
       },
     }
+
+    // Compress response for client
+    return compressAndEncodeMessage(response)
   }
 )
 
@@ -232,24 +244,25 @@ export const llamautoma = {
     )
 
     for await (const chunk of stream) {
-      // Stream each response from tasks
+      // Compress streaming responses for client
       if (chunk.streamResponses) {
         for (const response of chunk.streamResponses) {
           yield {
             type: response.type,
-            content: response.content,
+            content: compressAndEncodeMessage(response.content),
             metadata: response.metadata,
             timestamp: response.timestamp,
           }
         }
       }
 
-      // Stream final result
+      // Compress final result for client
       if (chunk.type === 'complete') {
         yield {
           type: 'complete',
-          result: chunk.result,
+          content: compressAndEncodeMessage(chunk.content),
           metadata: chunk.metadata,
+          timestamp: chunk.timestamp,
         }
       }
     }
