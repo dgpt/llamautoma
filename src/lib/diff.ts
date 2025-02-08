@@ -1,38 +1,38 @@
 import fastDiff from 'fast-diff'
 import { logger } from '@/logger'
-import { getFiles } from './file'
-import type { File } from '../ai/tools/schemas/file'
+import { getFile } from './file'
+import { compressAndEncodeFile, decompressAndDecodeFile } from './compression'
 import type { DiffEntry } from '../ai/tools/schemas/diff'
 
+// Functional composition helpers
+const getContent = async (path?: string, content?: string): Promise<string> =>
+  path ? await getFile(path) : (content ?? '')
+
+const decode = async (content: string): Promise<string> =>
+  content.startsWith('~') ? await decompressAndDecodeFile(content) : content
+
 /**
- * Core function to generate diffs between files
- * Does not handle compression - that's handled by the caller
+ * Generate a diff between two pieces of code
+ * At least one of originalPath or originalContent must be provided
  */
-export async function generateDiffs(files: File[]): Promise<DiffEntry[]> {
+export async function generateDiff(
+  newContent: string,
+  originalPath?: string,
+  originalContent?: string
+): Promise<[number, string][]> {
   try {
-    // Get all file paths that need to be diffed
-    const filePaths = files.map(f => f.path)
+    if (!originalPath && !originalContent) {
+      throw new Error('Either originalPath or originalContent must be provided')
+    }
 
-    // Request original file contents from client
-    const originals = await getFiles(filePaths)
+    // Get and decode content using functional composition
+    const original = await getContent(originalPath, originalContent)
+    const [decodedOriginal, decodedNew] = await Promise.all([decode(original), decode(newContent)])
 
-    // Generate diffs for each file
-    const changes = await Promise.all(
-      files.map(async file => {
-        const original = originals[file.path]
-        const originalContent = original?.content || ''
-        return {
-          path: file.path,
-          diff: fastDiff(originalContent, file.content) as [number, string][],
-        }
-      })
-    )
-
-    return changes
+    // Generate diff
+    return fastDiff(decodedOriginal, decodedNew) as [number, string][]
   } catch (error) {
-    logger.error(
-      `Error generating diffs: ${error instanceof Error ? error.message : String(error)}`
-    )
+    logger.error(`Error generating diff: ${error instanceof Error ? error.message : String(error)}`)
     throw new Error(
       `Failed to generate diff: ${error instanceof Error ? error.message : String(error)}`
     )
@@ -40,9 +40,27 @@ export async function generateDiffs(files: File[]): Promise<DiffEntry[]> {
 }
 
 /**
- * Helper to generate diffs and compress them for client communication
+ * Generate a compressed diff entry for a file
+ * At least one of originalPath or originalContent must be provided
  */
-export async function generateCompressedDiffs(files: File[]): Promise<DiffEntry[]> {
-  // Since we're not doing compression, just return regular diffs
-  return generateDiffs(files)
+export async function generateCompressedDiff(
+  path: string,
+  newContent: string,
+  originalPath?: string,
+  originalContent?: string
+): Promise<DiffEntry> {
+  try {
+    // Generate raw diff
+    const diff = await generateDiff(newContent, originalPath, originalContent)
+    return { path, diff }
+  } catch (error) {
+    logger.error(
+      `Error generating compressed diff: ${error instanceof Error ? error.message : String(error)}`
+    )
+    return {
+      path,
+      diff: [],
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
 }

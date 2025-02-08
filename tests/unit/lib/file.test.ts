@@ -2,6 +2,7 @@ import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
 import { getFile } from '@/lib/file'
 import { compressAndEncodeMessage } from '@/lib/compression'
 import { DEFAULT_AGENT_CONFIG } from '@/types'
+import { createStreamResponse, readClientStream } from '@/stream'
 
 describe('File Library', () => {
   const testConfig = {
@@ -104,5 +105,93 @@ describe('File Library', () => {
     expect(promise).rejects.toBeInstanceOf(Error)
     expect(promise).rejects.toHaveProperty('message', expect.stringContaining(streamError.message))
     expect(currentMock).toHaveBeenCalled()
+  })
+
+  test('should handle file read timeout', async () => {
+    const path = 'test.ts'
+    const config = {
+      ...DEFAULT_AGENT_CONFIG,
+      userInputTimeout: 100,
+    }
+
+    currentMock.mockImplementation(
+      () =>
+        new originalResponse(
+          new ReadableStream({
+            start(controller) {
+              setTimeout(() => {
+                controller.close()
+              }, 200)
+            },
+          })
+        )
+    )
+
+    await expect(getFile(path, config)).rejects.toThrow('File request timeout')
+  })
+
+  test('should handle stream ending without response', async () => {
+    const path = 'test.ts'
+    currentMock.mockImplementation(
+      () =>
+        new originalResponse(
+          new ReadableStream({
+            start(controller) {
+              controller.close()
+            },
+          })
+        )
+    )
+
+    await expect(getFile(path)).rejects.toThrow('Stream ended without response')
+  })
+
+  test('should handle invalid response type', async () => {
+    const path = 'test.ts'
+    currentMock.mockImplementation(
+      () =>
+        new originalResponse(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder()
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${compressAndEncodeMessage({ type: 'invalid', data: {} })}\n\n`
+                )
+              )
+              controller.close()
+            },
+          })
+        )
+    )
+
+    await expect(getFile(path)).rejects.toThrow('Invalid response type')
+  })
+
+  test('should handle missing content and error', async () => {
+    const path = 'test.ts'
+    currentMock.mockImplementation(
+      () =>
+        new originalResponse(
+          new ReadableStream({
+            start(controller) {
+              const encoder = new TextEncoder()
+              controller.enqueue(
+                encoder.encode(`data: ${compressAndEncodeMessage({ type: 'edit', data: {} })}\n\n`)
+              )
+              controller.close()
+            },
+          })
+        )
+    )
+
+    await expect(getFile(path)).rejects.toThrow('Response missing both content and error')
+  })
+
+  test('should handle stream reader creation failure', async () => {
+    const path = 'test.ts'
+    currentMock.mockImplementation(() => ({ body: null }) as Response)
+
+    await expect(getFile(path)).rejects.toThrow('Failed to create stream reader')
   })
 })

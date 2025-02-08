@@ -1,164 +1,121 @@
-import { expect, test, describe, beforeEach, afterEach } from 'bun:test'
-import { generateDiffs, generateCompressedDiffs } from '@/lib/diff'
-import type { File } from '@/ai/tools/schemas/file'
-import { logger } from '@/logger'
-import { mockStream, setTestMode, resetTestMode } from '@/tests/mocks/stream'
+import { expect, test, describe, spyOn, beforeEach, afterEach } from 'bun:test'
+import { generateDiff, generateCompressedDiff } from '@/lib/diff'
+import * as fileLib from '@/lib/file'
+import * as compression from '@/lib/compression'
+import fastDiff from 'fast-diff'
 
 describe('Diff Library', () => {
+  // Mock dependencies
+  let getFileSpy: ReturnType<typeof spyOn>
+  let decompressAndDecodeFileSpy: ReturnType<typeof spyOn>
+
   beforeEach(() => {
-    logger.debug('Setting up test...')
-    mockStream.clearMocks()
-    setTestMode()
-    logger.debug('Test setup complete')
+    // Mock file operations
+    getFileSpy = spyOn(fileLib, 'getFile')
+    getFileSpy.mockImplementation(() => Promise.resolve('~original content'))
+
+    // Mock compression
+    decompressAndDecodeFileSpy = spyOn(compression, 'decompressAndDecodeFile')
+    decompressAndDecodeFileSpy.mockImplementation(async (content: string) =>
+      content.startsWith('~') ? content.slice(1) : content
+    )
   })
 
   afterEach(() => {
-    logger.debug('Cleaning up test...')
-    mockStream.clearMocks()
-    resetTestMode()
-    logger.debug('Test cleanup complete')
+    getFileSpy.mockRestore()
+    decompressAndDecodeFileSpy.mockRestore()
   })
 
-  describe('generateDiffs', () => {
-    test('should generate diff for file modifications', async () => {
-      logger.debug('Starting file modification test')
-      // Mock original file
-      const originalContent = `
-import React from 'react';
-export const Counter = () => {
-  let count = 0;
-  const increment = () => count++;
-  const decrement = () => count--;
-  return (
-    <div>
-      <button onClick={decrement}>-</button>
-      <span>{count}</span>
-      <button onClick={increment}>+</button>
-    </div>
-  );
-};`
+  describe('generateDiff', () => {
+    test('should generate diff between file and new content', async () => {
+      const originalPath = 'test.ts'
+      const newContent = '~new content'
 
-      const newContent = `
-import React, { useState } from 'react';
-export const Counter = () => {
-  const [count, setCount] = useState(0);
-  return (
-    <div>
-      <button onClick={() => setCount(count - 1)}>-</button>
-      <span>{count}</span>
-      <button onClick={() => setCount(count + 1)}>+</button>
-    </div>
-  );
-};`
+      const diff = await generateDiff(newContent, originalPath)
 
-      logger.debug('Mocking file in test system')
-      mockStream.mockFile('src/components/Counter.tsx', originalContent)
-      logger.debug('File mocked successfully')
-
-      // Create input for diff generation
-      logger.debug('Creating diff input')
-      const files: File[] = [
-        {
-          path: 'src/components/Counter.tsx',
-          content: newContent,
-          type: 'update',
-        },
-      ]
-      logger.debug(`Created diff input: ${JSON.stringify(files)}`)
-
-      logger.debug('Calling generateDiffs')
-      const diffs = await generateDiffs(files)
-      logger.debug(`Got diffs: ${JSON.stringify(diffs)}`)
-
-      expect(diffs).toBeArray()
-      expect(diffs).toHaveLength(1)
-      expect(diffs[0]).toHaveProperty('path', 'src/components/Counter.tsx')
-      expect(diffs[0]).toHaveProperty('diff')
-      expect(diffs[0].diff).toBeArray()
-
-      // Each diff entry should be a tuple of [operation, content]
-      diffs[0].diff.forEach(entry => {
-        expect(entry).toBeArray()
-        expect(entry).toHaveLength(2)
-        expect(entry[0]).toBeNumber()
-        expect(entry[1]).toBeString()
-      })
-
-      // Verify some key changes are present
-      const diffText = diffs[0].diff.map(([_, text]) => text).join('')
-      expect(diffText).toInclude('useState')
-      expect(diffText).toInclude('setCount')
-      logger.debug('Test completed successfully')
+      expect(diff).toEqual(fastDiff('original content', 'new content'))
+      expect(getFileSpy).toHaveBeenCalledWith(originalPath)
+      expect(decompressAndDecodeFileSpy).toHaveBeenCalledTimes(2)
     })
 
-    test('should handle new file creation', async () => {
-      const newContent = 'const x = 2;'
+    test('should generate diff between original content and new content', async () => {
+      const originalContent = '~original content'
+      const newContent = '~new content'
 
-      // Don't mock the original file since it's a new file
-      const files: File[] = [
-        {
-          path: 'src/newfile.ts',
-          content: newContent,
-          type: 'create',
-        },
-      ]
+      const diff = await generateDiff(newContent, undefined, originalContent)
 
-      const diffs = await generateDiffs(files)
+      expect(diff).toEqual(fastDiff('original content', 'new content'))
+      expect(getFileSpy).not.toHaveBeenCalled()
+      expect(decompressAndDecodeFileSpy).toHaveBeenCalledTimes(2)
+    })
 
-      expect(diffs).toBeArray()
-      expect(diffs).toHaveLength(1)
-      expect(diffs[0]).toHaveProperty('path', 'src/newfile.ts')
-      expect(diffs[0]).toHaveProperty('diff')
-      expect(diffs[0].diff).toBeArray()
+    test('should handle compressed content', async () => {
+      const originalContent = '~compressed original'
+      const newContent = '~compressed new'
 
-      // For new files, everything should be marked as added
-      const diffText = diffs[0].diff.map(([op, text]) => text).join('')
-      expect(diffText).toBe(newContent)
+      const diff = await generateDiff(newContent, undefined, originalContent)
 
-      // Verify the diff operations - should only have additions
-      const ops = diffs[0].diff.map(([op, _]) => op)
-      expect(ops).toEqual([1]) // Only additions for new files
+      expect(diff).toEqual(fastDiff('compressed original', 'compressed new'))
+      expect(decompressAndDecodeFileSpy).toHaveBeenCalledTimes(2)
+    })
+
+    test('should throw when neither path nor content provided', async () => {
+      await expect(generateDiff('new content')).rejects.toThrow(
+        'Either originalPath or originalContent must be provided'
+      )
+    })
+
+    test('should handle file read errors', async () => {
+      getFileSpy.mockImplementation(() => Promise.reject(new Error('File read error')))
+
+      await expect(generateDiff('new content', 'test.ts')).rejects.toThrow('File read error')
+    })
+
+    test('should handle decompression errors', async () => {
+      decompressAndDecodeFileSpy.mockImplementation(() =>
+        Promise.reject(new Error('Decompression error'))
+      )
+
+      await expect(generateDiff('new content', undefined, '~invalid')).rejects.toThrow(
+        'Decompression error'
+      )
     })
   })
 
-  describe('generateCompressedDiffs', () => {
-    test('should generate and compress diffs', async () => {
-      const originalContent = 'const x = 1;'
-      const newContent = 'const x = 12;'
+  describe('generateCompressedDiff', () => {
+    test('should generate compressed diff entry', async () => {
+      const path = 'test.ts'
+      const newContent = '~new content'
 
-      logger.debug('Mocking file in test system')
-      mockStream.mockFile('src/test.ts', originalContent)
-      logger.debug('File mocked successfully')
+      const entry = await generateCompressedDiff(path, newContent, path)
 
-      const files: File[] = [
-        {
-          path: 'src/test.ts',
-          content: newContent,
-          type: 'update',
-        },
-      ]
+      expect(entry).toHaveProperty('path', path)
+      expect(entry.diff).toEqual(fastDiff('original content', 'new content'))
+      expect(entry.error).toBeUndefined()
+    })
 
-      logger.debug('Calling generateCompressedDiffs')
-      const diffs = await generateCompressedDiffs(files)
-      logger.debug(`Got diffs: ${JSON.stringify(diffs)}`)
+    test('should handle errors gracefully', async () => {
+      const path = 'test.ts'
+      getFileSpy.mockImplementation(() => Promise.reject(new Error('File error')))
 
-      expect(diffs).toBeArray()
-      expect(diffs).toHaveLength(1)
-      expect(diffs[0]).toHaveProperty('path', 'src/test.ts')
-      expect(diffs[0]).toHaveProperty('diff')
-      expect(diffs[0].diff).toBeArray()
+      const entry = await generateCompressedDiff(path, 'new content', path)
 
-      // Verify diff shows the change from 1 to 12
-      const diffText = diffs[0].diff.map(([op, text]) => text).join('')
-      logger.debug(`Diff text: ${diffText}`)
-      expect(diffText).toInclude('const x = 1')
-      expect(diffText).toInclude('const x = 12')
+      expect(entry).toHaveProperty('path', path)
+      expect(entry).toHaveProperty('error', 'Failed to generate diff: File error')
+      expect(entry.diff).toHaveLength(0)
+    })
 
-      // Verify the diff operations
-      const ops = diffs[0].diff.map(([op, _]) => op)
-      logger.debug(`Diff operations: ${JSON.stringify(ops)}`)
-      expect(ops).toContain(-1) // Deletion
-      expect(ops).toContain(1) // Addition
+    test('should handle both compressed and uncompressed content', async () => {
+      const path = 'test.ts'
+      const newContent = '~compressed new'
+      const originalContent = '~uncompressed original'
+
+      const entry = await generateCompressedDiff(path, newContent, undefined, originalContent)
+
+      expect(entry).toHaveProperty('path', path)
+      expect(entry.diff).toEqual(fastDiff('uncompressed original', 'compressed new'))
+      expect(entry.error).toBeUndefined()
+      expect(decompressAndDecodeFileSpy).toHaveBeenCalledTimes(2)
     })
   })
 })

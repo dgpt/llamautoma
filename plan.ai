@@ -31,50 +31,37 @@ Llamautoma is a TypeScript-based AI agent framework built on LangChain.js and La
    - JSON-formatted messages
    - Progress updates and streaming content
 
-### Safety Features
-1. Input Validation
-   - Length limits
-   - Content filtering
-   - Rate limiting
-
-2. Tool Safety
-   - Confirmation requirements
-   - Feedback collection
-   - Pattern detection
+### Message Types
+1. Critical Response Types:
+   - edit: File action to perform (uses brotli compressed fast-diff output)
+   - run: Shell action for client execution (output streamed back)
+   - chat: Message to show in chat window
+   - status: Task status message (shown at bottom, updated with chat)
 
 ## Compression & Encoding Strategy
 
-### File Compression
-1. All file content MUST be compressed using Brotli
-   - Use brotliCompress/brotliDecompress from zlib
-   - Wrap in promisify for async usage
-   - Apply to all file content before transmission
-
-### Message Compression
-1. All messages MUST be compressed using MessagePack
-   - Use @msgpack/msgpack for encoding/decoding
-   - Apply to all request/response bodies
-   - Handle streaming messages properly
-
-### String Encoding
-1. All binary data MUST be encoded using Base85
-   - Use @alttiri/base85 for encoding/decoding
-   - More efficient than base64 (4 bytes -> 5 chars vs 3 bytes -> 4 chars)
-   - Better compression ratio for code content
+### Compression Rules
+1. All compressed content MUST:
+   - Start with '~' prefix to indicate compression
+   - Use Brotli for file content compression
+   - Use MessagePack for structured data
+   - Use Base85 for binary-to-text encoding
+   - Follow consistent compression order
 
 ### Implementation Details
 1. File Operations
    ```typescript
    // Compress and encode file content
    async function compressAndEncodeFile(content: string): Promise<string> {
-     const compressed = await brotliCompressAsync(Buffer.from(content))
-     return base85Encode(compressed)
+     const compressed = brotliCompressSync(Buffer.from(content))
+     return '~' + base85Encode(compressed)
    }
 
    // Decode and decompress file content
-   async function decodeAndDecompressFile(encodedStr: string): Promise<string> {
-     const compressed = Buffer.from(base85Decode(encodedStr))
-     const decompressed = await brotliDecompressAsync(compressed)
+   async function decodeFile(encodedStr: string): Promise<string> {
+     if (!encodedStr.startsWith('~')) return encodedStr
+     const compressed = Buffer.from(base85Decode(encodedStr.slice(1)))
+     const decompressed = brotliDecompressSync(compressed)
      return decompressed.toString('utf-8')
    }
    ```
@@ -84,37 +71,26 @@ Llamautoma is a TypeScript-based AI agent framework built on LangChain.js and La
    // Compress and encode message
    function compressAndEncodeMessage(message: any): string {
      const msgpacked = msgpackEncode(message)
-     return base85Encode(Buffer.from(msgpacked))
+     return '~' + base85Encode(Buffer.from(msgpacked))
    }
 
    // Decode and decompress message
    function decodeAndDecompressMessage(encodedStr: string): any {
-     const msgpacked = Buffer.from(base85Decode(encodedStr))
+     if (!encodedStr.startsWith('~')) return encodedStr
+     const msgpacked = Buffer.from(base85Decode(encodedStr.slice(1)))
      return msgpackDecode(msgpacked)
    }
    ```
 
-3. Streaming Support
-   - Use ReadableStream for all streaming operations
-   - Properly handle compression in chunks
+3. Compression Order
+   - Files: Content -> Brotli -> Base85 -> Add '~' prefix
+   - Messages: Content -> MessagePack -> Base85 -> Add '~' prefix
+
+4. Streaming Support
+   - Use ReadableStream for streaming operations
+   - Handle compression in chunks
    - Maintain proper backpressure
-   - Clean up resources (e.g., reader.releaseLock())
-
-### Client-Server Communication
-1. Request Headers
-   - 'Content-Type': 'application/x-msgpack' for compressed messages
-   - 'Accept': 'application/x-msgpack' to request compressed responses
-
-2. Response Headers
-   - 'Content-Type': 'application/x-msgpack' for compressed messages
-   - 'Content-Type': 'text/event-stream' for SSE
-   - 'Cache-Control': 'no-cache' for SSE
-   - 'Connection': 'keep-alive' for SSE
-
-3. SSE Events
-   - Compress event data with MessagePack + Base85
-   - Format: `event: ${event}\ndata: ${compressed}\n\n`
-   - Include retry timing: 'retry: 1000\n\n'
+   - Clean up resources properly
 
 ### Error Handling
 1. Compression Errors
@@ -133,10 +109,25 @@ Llamautoma is a TypeScript-based AI agent framework built on LangChain.js and La
    - Balance memory usage vs compression efficiency
    - Consider client memory constraints
 
-2. Compression Order
-   - Files: Content -> Brotli -> Base85
-   - Messages: Content -> MessagePack -> Base85
-   - Maintain consistent order in all operations
+## Project Structure
+src/ai
+  index.ts <- entrypoint, custom react agent implementation
+  llm.ts <- ChatOllama model
+  tasks/ <- langgraph task definitions
+    - coder.ts <- generates code based on user's prompt
+    - reviewer.ts <- reviews code for correctness
+    - planner.ts <- interprets requests and plans code
+    - summarizer.ts <- summarizes messages
+    - lib.ts <- shared libraries
+    - intent.ts <- determines request intent
+
+  tools/ <- atomic tools
+    - eval.ts <- safe ts evaluation using Bun.eval()
+    - search.ts <- web search tool
+    - extract.ts <- web text extraction
+    - run.ts <- shell command handling
+    - diff.ts <- code diff generation
+    - file.ts <- file operations
 
 ## Testing Strategy
 1. Unit Tests
