@@ -1,88 +1,40 @@
 import { Elysia } from 'elysia'
-import { stream, Stream } from './stream'
-import { llamautoma } from './ai'
-import { logger } from './logger'
+import { createStreamResponse } from '@/stream'
+import { llamautoma } from '@/ai'
+import { logger } from '@/logger'
 
-/**
- * Create a generator for sync events
- */
-async function* createSyncGenerator() {
-  // Emit progress
-  yield {
-    type: 'progress',
-    task: 'sync',
-    status: 'Starting workspace sync...',
-    timestamp: Date.now(),
-  }
-
-  // TODO: Implement sync logic here
-  // This is a placeholder that just emits a completion event
-  yield {
-    type: 'complete',
-    task: 'sync',
-    timestamp: Date.now(),
-  }
-}
-
-/**
- * Handle stream errors by emitting error events
- */
-function createErrorHandler(stream: Stream, task: string) {
-  return (error: Error) => {
-    stream.emit({
-      type: 'error',
-      task,
-      error: error.message,
-      timestamp: Date.now(),
-    })
-  }
-}
-
+// Create server instance
 const app = new Elysia()
 
-// Add middleware to handle compression
-app.derive(({ request }) => {
-  const acceptMsgPack = request.headers.get('Accept') === 'application/x-msgpack'
-  return { acceptMsgPack }
-})
+// Error response helper
+const errorResponse = (error: unknown, status = 500) =>
+  new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
 
-// Chat endpoint
-app.post('/v1/chat', async ({ body, request }) => {
-  const threadId = request.headers.get('X-Thread-ID') || undefined
-
+// Chat endpoint - handles all AI interactions
+app.post('/v1/chat', async ({ request }) => {
   try {
-    const generator = llamautoma.stream(body, {
-      configurable: { thread_id: threadId },
-    })
-
-    return stream.createStreamHandler(generator, createErrorHandler(stream, 'chat'))
+    const body = await request.json()
+    const threadId = request.headers.get('X-Thread-ID')
+    const stream = llamautoma.stream(body, { threadId })
+    return createStreamResponse(stream)
   } catch (error) {
     logger.error('Chat error:', error)
-    const response = stream.createResponse(threadId)
-    stream.emit({
-      type: 'error',
-      task: 'chat',
-      error: error instanceof Error ? error.message : String(error),
-      timestamp: Date.now(),
-    })
-    return response
+    return errorResponse(error)
   }
 })
 
-// Sync endpoint
+// Sync endpoint - handles workspace synchronization
 app.post('/v1/sync', async ({ request }) => {
   try {
-    return stream.createStreamHandler(createSyncGenerator(), createErrorHandler(stream, 'sync'))
+    const body = await request.json()
+    const stream = llamautoma.sync(body)
+    return createStreamResponse(stream)
   } catch (error) {
     logger.error('Sync error:', error)
-    const response = stream.createResponse()
-    stream.emit({
-      type: 'error',
-      task: 'sync',
-      error: error instanceof Error ? error.message : String(error),
-      timestamp: Date.now(),
-    })
-    return response
+    return errorResponse(error)
   }
 })
 

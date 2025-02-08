@@ -1,148 +1,108 @@
-import { expect, test, describe } from 'bun:test'
-import { getFiles } from '@/lib/file'
-import { mockStream } from '@/tests/mocks/stream'
-import { logger } from '@/logger'
-import type { StreamEvent } from '@/types/stream'
-
-// Increase test timeout
-const TEST_TIMEOUT = 10000
-
-// Types for file streaming
-interface FileRequest {
-  type: 'file_request'
-  data: {
-    requestType: 'file' | 'files' | 'directory' | 'directories'
-    paths: string[]
-    includePattern?: string
-    excludePattern?: string
-  }
-}
+import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
+import { getFile } from '@/lib/file'
+import { compressAndEncodeMessage } from '@/lib/compression'
+import { DEFAULT_AGENT_CONFIG } from '@/types'
 
 describe('File Library', () => {
-  describe('getFiles', () => {
-    test(
-      'should get single file',
-      async () => {
-        logger.debug('Starting single file test')
-        const content = 'test file content'
-        mockStream.mockFile('src/components/Counter.tsx', content)
+  const testConfig = {
+    ...DEFAULT_AGENT_CONFIG,
+    userInputTimeout: 100, // Short timeout for faster tests
+  }
 
-        const files = await getFiles(['src/components/Counter.tsx'])
-        const fileOp = files['src/components/Counter.tsx']
-
-        expect(fileOp).toBeDefined()
-        expect(fileOp.error).toBeUndefined()
-        expect(fileOp.content).toBeDefined()
-        expect(fileOp.content).toBe(content)
-        logger.debug('Single file test completed')
+  const createMockResponse = (data: unknown) => {
+    const encoder = new TextEncoder()
+    const compressed = compressAndEncodeMessage({ type: 'edit', data })
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
+        controller.close()
       },
-      TEST_TIMEOUT
+    })
+  }
+
+  const originalResponse = globalThis.Response
+  let currentMock: ReturnType<typeof mock>
+
+  beforeEach(() => {
+    currentMock = mock(() => {})
+    currentMock.prototype = originalResponse.prototype
+    globalThis.Response = currentMock as unknown as typeof Response
+  })
+
+  afterEach(() => {
+    globalThis.Response = originalResponse
+  })
+
+  test('should get file content', async () => {
+    const content = 'test content'
+    currentMock.mockImplementation(() => new originalResponse(createMockResponse({ content })))
+
+    const result = await getFile('test.ts', testConfig)
+    expect(result).toBe(content)
+    expect(currentMock).toHaveBeenCalled()
+  })
+
+  test('should propagate file error from response', async () => {
+    const error = 'test error'
+    currentMock.mockImplementation(() => new originalResponse(createMockResponse({ error })))
+
+    const promise = getFile('test.ts', testConfig)
+    expect(promise).rejects.toBeInstanceOf(Error)
+    expect(promise).rejects.toHaveProperty('message', error)
+    expect(currentMock).toHaveBeenCalled()
+  })
+
+  test('should timeout when no response received', async () => {
+    currentMock.mockImplementation(() => new originalResponse(new ReadableStream({ start() {} })))
+
+    const promise = getFile('test.ts', testConfig)
+    expect(promise).rejects.toBeInstanceOf(Error)
+    expect(promise).rejects.toHaveProperty('message', expect.stringContaining('timeout'))
+    expect(currentMock).toHaveBeenCalled()
+  }, 1000)
+
+  test('should reject when response missing required fields', async () => {
+    currentMock.mockImplementation(() => new originalResponse(createMockResponse({})))
+
+    const promise = getFile('test.ts', testConfig)
+    expect(promise).rejects.toBeInstanceOf(Error)
+    expect(currentMock).toHaveBeenCalled()
+  })
+
+  test('should reject when response body missing', async () => {
+    currentMock.mockImplementation(() => ({ body: null }) as Response)
+
+    const promise = getFile('test.ts', testConfig)
+    expect(promise).rejects.toBeInstanceOf(Error)
+    expect(currentMock).toHaveBeenCalled()
+  })
+
+  test('should reject non-edit response type', async () => {
+    currentMock.mockImplementation(
+      () => new originalResponse(createMockResponse({ type: 'chat', data: {} }))
     )
 
-    test(
-      'should get multiple files',
-      async () => {
-        logger.debug('Starting multiple files test')
-        const files = {
-          'src/components/Counter.tsx': 'content 1',
-          'src/components/App.tsx': 'content 2',
-        }
-        for (const [path, content] of Object.entries(files)) {
-          mockStream.mockFile(path, content)
-        }
+    const promise = getFile('test.ts', testConfig)
+    expect(promise).rejects.toBeInstanceOf(Error)
+    expect(currentMock).toHaveBeenCalled()
+  })
 
-        const result = await getFiles(Object.keys(files))
-
-        // Verify each file's content
-        for (const [path, content] of Object.entries(files)) {
-          const fileOp = result[path]
-          expect(fileOp).toBeDefined()
-          expect(fileOp.error).toBeUndefined()
-          expect(fileOp.content).toBe(content)
-        }
-        logger.debug('Multiple files test completed')
-      },
-      TEST_TIMEOUT
+  test('should propagate stream errors', async () => {
+    const streamError = new Error('test stream error')
+    currentMock.mockImplementation(
+      () =>
+        new originalResponse(
+          new ReadableStream({
+            start(controller) {
+              controller.error(streamError)
+            },
+          })
+        )
     )
 
-    test(
-      'should handle missing files',
-      async () => {
-        logger.debug('Starting missing file test')
-        const files = await getFiles(['nonexistent.ts'])
-        expect(files['nonexistent.ts']).toEqual({
-          path: 'nonexistent.ts',
-          content: '',
-          error: 'File not found: nonexistent.ts',
-        })
-        logger.debug('Missing file test completed')
-      },
-      TEST_TIMEOUT
-    )
-
-    test(
-      'should handle invalid response data',
-      async () => {
-        logger.debug('Starting invalid response test')
-        // Mock emitCompressed to emit invalid data
-        mockStream.emitCompressed = () => {
-          mockStream.emit('data', 'invalid')
-        }
-
-        await expect(getFiles(['test.ts'])).rejects.toThrow()
-        logger.debug('Invalid response test completed')
-      },
-      TEST_TIMEOUT
-    )
-
-    test(
-      'should handle error response',
-      async () => {
-        logger.debug('Starting error response test')
-        // Mock emitCompressed to emit error
-        mockStream.emitCompressed = () => {
-          const errorEvent: StreamEvent = {
-            type: 'error',
-            task: 'file',
-            error: 'Test error',
-            timestamp: Date.now(),
-          }
-          mockStream.emit('data', errorEvent)
-        }
-
-        await expect(getFiles(['test.ts'])).rejects.toThrow('Test error')
-        logger.debug('Error response test completed')
-      },
-      TEST_TIMEOUT
-    )
-
-    test(
-      'should handle include/exclude patterns',
-      async () => {
-        logger.debug('Starting pattern test')
-        const files = {
-          'src/components/Counter.tsx': 'content 1',
-          'src/components/App.tsx': 'content 2',
-          'src/components/test.spec.ts': 'test content',
-        }
-        for (const [path, content] of Object.entries(files)) {
-          mockStream.mockFile(path, content)
-        }
-
-        const result = await getFiles(Object.keys(files), '*.tsx')
-
-        // Should only include .tsx files
-        expect(Object.keys(result)).toHaveLength(2)
-        expect(result['src/components/Counter.tsx']).toBeDefined()
-        expect(result['src/components/App.tsx']).toBeDefined()
-        expect(result['src/components/test.spec.ts']).toBeUndefined()
-
-        // Verify content of included files
-        expect(result['src/components/Counter.tsx'].content).toBe('content 1')
-        expect(result['src/components/App.tsx'].content).toBe('content 2')
-        logger.debug('Pattern test completed')
-      },
-      TEST_TIMEOUT
-    )
+    const promise = getFile('test.ts', testConfig)
+    expect(promise).rejects.toBeInstanceOf(Error)
+    expect(promise).rejects.toHaveProperty('message', expect.stringContaining(streamError.message))
+    expect(currentMock).toHaveBeenCalled()
   })
 })

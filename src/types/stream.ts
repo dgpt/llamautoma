@@ -10,37 +10,37 @@ export const BaseEventSchema = z.object({
 })
 
 /**
- * Response event schema
+ * Schema for response events (shown in chat window)
  */
 export const ResponseEventSchema = BaseEventSchema.extend({
   type: z.literal('response'),
-  content: z.string().describe('Response content'),
-  metadata: z.record(z.any()).optional().describe('Optional metadata'),
+  content: z.string().describe('Content to display'),
+  metadata: z.record(z.any()).optional().describe('Optional metadata about the response'),
 })
 
 /**
- * Progress event schema
+ * Schema for progress events (shown at bottom of chat)
  */
 export const ProgressEventSchema = BaseEventSchema.extend({
   type: z.literal('progress'),
-  status: z.string().describe('Progress status message'),
+  status: z.string().describe('Current status message'),
 })
 
 /**
- * Error event schema
+ * Schema for error events
  */
 export const ErrorEventSchema = BaseEventSchema.extend({
   type: z.literal('error'),
   error: z.string().describe('Error message'),
-  stack: z.string().optional().describe('Optional stack trace'),
 })
 
 /**
- * Complete event schema
+ * Schema for completion events
  */
 export const CompleteEventSchema = BaseEventSchema.extend({
   type: z.literal('complete'),
-  summary: z.string().optional().describe('Optional completion summary'),
+  final_status: z.string().optional().describe('Final status message'),
+  responses: z.array(z.any()).optional().describe('Collection of responses from the task'),
 })
 
 /**
@@ -54,15 +54,7 @@ export const StreamEventSchema = z.discriminatedUnion('type', [
 ])
 
 export type StreamEvent = z.infer<typeof StreamEventSchema>
-
-/**
- * Client-server streaming message schema
- */
-export const StreamMessageSchema = z.object({
-  event: z.enum(['start', 'content', 'end']).describe('Message event type'),
-  threadId: z.string().optional().describe('Optional thread ID'),
-  data: z.any().optional().describe('Message data'),
-  timestamp: z.number().describe('Message timestamp'),
-})
-
-export type StreamMessage = z.infer<typeof StreamMessageSchema>
+export type ResponseEvent = z.infer<typeof ResponseEventSchema>
+export type ProgressEvent = z.infer<typeof ProgressEventSchema>
+export type ErrorEvent = z.infer<typeof ErrorEventSchema>
+export type CompleteEvent = z.infer<typeof CompleteEventSchema>

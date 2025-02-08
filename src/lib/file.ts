@@ -1,109 +1,81 @@
-import { streamHandler } from '../stream'
 import { logger } from '@/logger'
-import type { FileOp } from 'llamautoma-types'
-import { decodeAndDecompressMessage } from '@/lib/compression'
+import { createStreamResponse, readClientStream } from '@/stream'
+import type { StreamMessage } from '@/stream'
+import { DEFAULT_AGENT_CONFIG } from '@/types'
 
 /**
- * Core function to get files from the client
- * Basic file operations only - compression/encoding handled at higher levels
+ * Get file content from client
+ * Returns compressed and encoded file content
  */
-export async function getFiles(
-  paths: string[],
-  includePattern?: string,
-  excludePattern?: string
-): Promise<{ [path: string]: string }> {
+export async function getFile(path: string, config = DEFAULT_AGENT_CONFIG): Promise<string> {
   try {
-    // Format request for client
-    const clientRequest = {
-      type: 'file_request',
+    // Create request message
+    const request: StreamMessage = {
+      type: 'edit',
       data: {
-        requestType: paths.length === 1 ? 'file' : 'files',
-        paths,
-        includePattern,
-        excludePattern,
+        path,
+        action: 'read',
       },
     }
 
-    // Send request to client
-    streamHandler.sendResponse('file', JSON.stringify(clientRequest))
-    logger.debug(`Sent file request: ${JSON.stringify(clientRequest)}`)
+    // Create response stream
+    const response = createStreamResponse({
+      async *[Symbol.asyncIterator]() {
+        yield request
+      },
+    })
+    const reader = response.body?.getReader()
+    if (!reader) throw new Error('Failed to create stream reader')
 
-    // Collect file chunks
-    const files: { [path: string]: FileOp } = {}
-
+    // Create response promise
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        cleanup()
-        logger.error('File request timeout')
+        reader.releaseLock()
         reject(new Error('File request timeout'))
-      }, 30000) // 30 second timeout
+      }, config.userInputTimeout)
 
-      const onData = (data: any) => {
-        try {
-          logger.debug(`Raw data: ${data.toString()}`)
-          const response = decodeAndDecompressMessage(data)
-          logger.debug(`Decoded response: ${JSON.stringify(response)}`)
+      // Read response stream
+      readClientStream(reader)
+        .next()
+        .then(({ value, done }) => {
+          clearTimeout(timeout)
+          if (done) {
+            reject(new Error('Stream ended without response'))
+            return
+          }
 
-          switch (response.type) {
-            case 'response': {
-              logger.debug(`Response content: ${response.content}`)
-              const fileResponse = JSON.parse(response.content)
-              if (fileResponse.type === 'file_chunk') {
-                const { path, content, error } = fileResponse.data
-                logger.debug(`Received file chunk for ${path}`)
-
-                // Initialize file entry if needed
-                if (!files[path]) {
-                  files[path] = { path, content: '' }
-                }
-
-                // Handle error
-                if (error) {
-                  files[path].error = error
-                  return
-                }
-
-                // Add content directly
-                const fileEntry = files[path] as FileOp & { content: string }
-                if (fileEntry) {
-                  fileEntry.content = content
-                  logger.debug(`Added content for ${path}`)
-                }
-              }
-              break
+          if (value?.type === 'edit' && typeof value.data === 'object' && value.data !== null) {
+            const { content, error } = value.data as {
+              content?: string
+              error?: string
             }
 
-            case 'complete':
-              logger.debug(`File operation complete: ${JSON.stringify(files)}`)
-              cleanup()
-              resolve(files)
-              break
+            if (error) {
+              logger.error(`Error reading file ${path}: ${error}`)
+              reject(new Error(error))
+              return
+            }
 
-            case 'error':
-              logger.error(`Received error response: ${response.error}`)
-              cleanup()
-              reject(new Error(response.error))
-              break
+            if (content) {
+              resolve(content)
+              return
+            }
+
+            reject(new Error('Response missing both content and error'))
+            return
           }
-        } catch (error) {
+
+          reject(new Error('Invalid response type'))
+        })
+        .catch(error => {
+          clearTimeout(timeout)
           logger.error(`Failed to process file response: ${error}`)
-          cleanup()
           reject(error)
-        }
-      }
-
-      const cleanup = () => {
-        clearTimeout(timeout)
-        streamHandler.off('data', onData)
-        logger.debug('Cleaned up file response handler')
-      }
-
-      streamHandler.on('data', onData)
-      logger.debug('Registered file response handler')
+        })
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     logger.error(`File operation error: ${message}`)
-    throw new Error(`Failed to read files: ${message}`)
+    throw new Error(`Failed to read file: ${message}`)
   }
 }

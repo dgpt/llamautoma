@@ -3,7 +3,6 @@ import { logger } from '@/logger'
 import { getFiles } from './file'
 import type { File } from '../ai/tools/schemas/file'
 import type { DiffEntry } from '../ai/tools/schemas/diff'
-import { decodeFile } from './compression'
 
 /**
  * Core function to generate diffs between files
@@ -21,18 +20,7 @@ export async function generateDiffs(files: File[]): Promise<DiffEntry[]> {
     const changes = await Promise.all(
       files.map(async file => {
         const original = originals[file.path]
-        // For new files or missing files, use empty string
-        const originalContent =
-          original?.content && !original.error ? await decodeFile(original.content) : ''
-
-        // For new files, show everything as added
-        if (file.type === 'create') {
-          return {
-            path: file.path,
-            diff: [[1, file.content]] as [number, string][],
-          }
-        }
-
+        const originalContent = original?.content || ''
         return {
           path: file.path,
           diff: fastDiff(originalContent, file.content) as [number, string][],
