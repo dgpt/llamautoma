@@ -1,7 +1,7 @@
 import fastDiff from 'fast-diff'
 import { logger } from '@/logger'
 import { getFile } from './file'
-import { compressAndEncodeFile, decompressAndDecodeFile } from './compression'
+import { decompressAndDecodeFile } from './compression'
 import type { DiffEntry } from '../ai/tools/schemas/diff'
 
 // Functional composition helpers

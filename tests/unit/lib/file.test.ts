@@ -2,7 +2,6 @@ import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
 import { getFile } from '@/lib/file'
 import { compressAndEncodeMessage } from '@/lib/compression'
 import { DEFAULT_AGENT_CONFIG } from '@/types'
-import { createStreamResponse, readClientStream } from '@/stream'
 
 describe('File Library', () => {
   const testConfig = {
