@@ -48,14 +48,14 @@ app.derive(({ request }) => {
 
 // Chat endpoint
 app.post('/v1/chat', async ({ body, request }) => {
-  const threadId = request.headers.get('X-Thread-ID') || 'default'
+  const threadId = request.headers.get('X-Thread-ID') || undefined
 
   try {
     const generator = llamautoma.stream(body, {
       configurable: { thread_id: threadId },
     })
 
-    return stream.createStreamHandler(generator, threadId, createErrorHandler(stream, 'chat'))
+    return stream.createStreamHandler(generator, createErrorHandler(stream, 'chat'))
   } catch (error) {
     logger.error('Chat error:', error)
     const response = stream.createResponse(threadId)
@@ -71,17 +71,11 @@ app.post('/v1/chat', async ({ body, request }) => {
 
 // Sync endpoint
 app.post('/v1/sync', async ({ request }) => {
-  const threadId = request.headers.get('X-Thread-ID') || 'default'
-
   try {
-    return stream.createStreamHandler(
-      createSyncGenerator(),
-      threadId,
-      createErrorHandler(stream, 'sync')
-    )
+    return stream.createStreamHandler(createSyncGenerator(), createErrorHandler(stream, 'sync'))
   } catch (error) {
     logger.error('Sync error:', error)
-    const response = stream.createResponse(threadId)
+    const response = stream.createResponse()
     stream.emit({
       type: 'error',
       task: 'sync',

@@ -36,7 +36,7 @@ export class Stream extends EventEmitter {
   /**
    * Create a streaming response with proper headers
    */
-  createResponse(threadId: string): Response {
+  createResponse(threadId?: string): Response {
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
       start(controller) {
@@ -44,7 +44,7 @@ export class Stream extends EventEmitter {
           encoder.encode(
             `data: ${compressAndEncodeMessage({
               event: 'start',
-              threadId,
+              ...(threadId && { threadId }),
               timestamp: Date.now(),
             })}\n\n`
           )
