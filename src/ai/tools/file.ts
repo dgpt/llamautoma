@@ -28,7 +28,10 @@ export const fileTool = tool(
       }
 
       // Process each path
-      const results: Record<string, { path: string; content?: string; error?: string }> = {}
+      const results: Record<
+        string,
+        { path: string; content?: string; error?: string; files?: Record<string, string> }
+      > = {}
 
       // Merge tool config with default config
       const config = {
@@ -55,13 +58,8 @@ export const fileTool = tool(
                 input.includePattern,
                 input.excludePattern
               )
-              // Get first file's content as the representative content
-              const firstFile = Object.entries(files)[0]
-              if (firstFile) {
-                results[path] = { path, content: firstFile[1] }
-              } else {
-                results[path] = { path, error: 'No matching files found' }
-              }
+              // Always return files object, even if empty
+              results[path] = { path, files }
               break
             }
           }
