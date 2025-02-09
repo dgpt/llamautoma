@@ -1,12 +1,45 @@
-import { expect } from 'bun:test'
+import { afterEach, expect, mock } from 'bun:test'
 import { ChatOllama } from '@langchain/ollama'
 import { MemorySaver, entrypoint } from '@langchain/langgraph'
 import { RunnableConfig } from '@langchain/core/runnables'
+import { compressAndEncodeMessage } from '@/lib/compression'
 
 // Constants
 export const TEST_TIMEOUT = 60000 // 60 seconds for real model responses
 export const TEST_MODEL = 'qwen2.5-coder:1.5b' // Smaller, faster model for tests
 export const TEST_BASE_URL = 'http://localhost:11434'
+
+type Mock = ReturnType<typeof mock>
+
+// Mock response creation helper
+export const createMockResponse = (data: Record<string, unknown>) => {
+  const encoder = new TextEncoder()
+  const compressed = compressAndEncodeMessage({ type: 'edit', data })
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
+      controller.close()
+    },
+  })
+}
+
+const originalResponse = globalThis.Response
+export const mockStream = (fn: Mock, stream: ReadableStream) => {
+  fn.mockImplementation(() => new originalResponse(stream))
+  globalThis.Response = fn as unknown as typeof Response
+  return fn
+}
+
+export const mockClientResponse = (fn: Mock, data: Record<string, unknown>) => {
+  fn.mockImplementation(() => new originalResponse(createMockResponse(data)))
+  globalThis.Response = fn as unknown as typeof Response
+  return fn
+}
+
+afterEach(() => {
+  mock.restore()
+  globalThis.Response = originalResponse
+})
 
 // Test context type
 export interface TestContext {
@@ -93,25 +126,4 @@ export async function runWithTestConfig<T>(task: any, input: any): Promise<T> {
     },
   })
   return result as T
-}
-
-// Mock file system for tests
-export const mockFileSystem = new Map<string, string>()
-
-// Mock stream functions for tests
-export const streamToClient = async (request: any): Promise<void> => {
-  // For tests, we'll just store the request
-  mockFileSystem.set('lastRequest', JSON.stringify(request))
-}
-
-export const waitForClientResponse = async <T>(): Promise<T> => {
-  // For tests, we'll return a file complete response
-  return {
-    type: 'file_complete',
-  } as T
-}
-
-// Mock file tool response for tests
-export const mockFileToolResponse = (path: string, content: string): void => {
-  mockFileSystem.set(path, content)
 }

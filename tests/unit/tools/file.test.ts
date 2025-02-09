@@ -1,31 +1,15 @@
-import { expect, test, describe, beforeAll, afterAll, mock } from 'bun:test'
+import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
 import { fileTool } from '@/ai/tools/file'
-import { mockFileSystem } from '@/tests/unit/utils'
-
-// Mock the file module
-mock.module('@/lib/file', () => ({
-  getFile: async (path: string) => {
-    const content = mockFileSystem.get(path)
-    if (!content) {
-      throw new Error('File not found')
-    }
-    return content
-  },
-  getDirectory: async (path: string) => {
-    const files: Record<string, string> = {}
-    for (const [key, value] of mockFileSystem.entries()) {
-      // Only include files that are direct children of the directory
-      if (key.startsWith(path + '/') && !key.slice(path.length + 1).includes('/')) {
-        files[key] = value
-      }
-    }
-    // Always return files object, even if empty
-    return files
-  },
-}))
 
 describe('File Tool', () => {
-  beforeAll(() => {
+  const originalResponse = globalThis.Response
+  let currentMock: ReturnType<typeof mock>
+  let mockFileSystem: Map<string, string> = new Map()
+  beforeEach(() => {
+    currentMock = mock(() => {})
+    currentMock.prototype = originalResponse.prototype
+    globalThis.Response = currentMock as unknown as typeof Response
+
     // Set up test fixtures
     mockFileSystem.set('test1.txt', 'test file content\n')
     mockFileSystem.set('test2.txt', 'test file 2 content\n')
@@ -34,8 +18,7 @@ describe('File Tool', () => {
     mockFileSystem.set('test/dir2/file.ts', 'test ts file 2\n')
   })
 
-  afterAll(() => {
-    // Clean up test fixtures
+  afterEach(() => {
     mockFileSystem.clear()
   })
 
