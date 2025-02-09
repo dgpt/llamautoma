@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { logger } from '@/logger'
-import type { StreamMessage } from '@/stream'
+import type { StreamEvent } from '@/types/stream'
 import {
   compressAndEncodeFile,
   compressAndEncodeMessage,
@@ -18,6 +18,20 @@ export class MockStreamHandler extends EventEmitter {
   constructor() {
     super()
     this.setMaxListeners(100)
+  }
+
+  /**
+   * Decode a stream event
+   */
+  decodeEvent(data: Buffer | string): any {
+    const text = typeof data === 'string' ? data : data.toString()
+    if (!text.startsWith('data: ')) return {}
+    try {
+      return decodeAndDecompressMessage(text.slice(6))
+    } catch (error) {
+      logger.error('Failed to decode event:', error)
+      return {}
+    }
   }
 
   /**
@@ -53,33 +67,86 @@ export class MockStreamHandler extends EventEmitter {
   /**
    * Create mock response stream
    */
-  createMockResponse(event: StreamMessage): ReadableStream {
+  createMockResponse(event: StreamEvent): ReadableStream {
     const encoder = new TextEncoder()
-    const { path } = event.data as { path: string; action: string }
-    const content = mockFiles.get(path)
+    let path: string
+    let fileContent: string | undefined
 
-    return new ReadableStream({
-      start(controller) {
-        // Create response event
-        const response: StreamMessage = {
-          type: 'edit',
-          data: content ? { content, path } : { error: `File not found: ${path}`, path },
+    if (event.type === 'response' && event.content) {
+      const content = JSON.parse(event.content)
+      if (content.type === 'file_request') {
+        // Handle file request
+        const { paths } = content.data
+        path = paths[0]
+        fileContent = mockFiles.get(path)
+
+        // Create file chunk response
+        const response: StreamEvent = {
+          type: 'response',
+          task: 'file',
+          content: JSON.stringify({
+            type: 'file_chunk',
+            data: {
+              path,
+              content: fileContent,
+              done: true,
+            },
+          }),
+          timestamp: Date.now(),
         }
 
-        // Emit compressed response
-        const compressed = compressAndEncodeMessage(response)
-        controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
-        controller.close()
-      },
-    })
+        return new ReadableStream({
+          start(controller) {
+            // Emit file chunk response
+            const compressed = compressAndEncodeMessage(response)
+            controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
+
+            // Emit completion event
+            const complete: StreamEvent = {
+              type: 'complete',
+              task: 'file',
+              timestamp: Date.now(),
+            }
+            const compressedComplete = compressAndEncodeMessage(complete)
+            controller.enqueue(encoder.encode(`data: ${compressedComplete}\n\n`))
+            controller.close()
+          },
+        })
+      } else {
+        // Handle other response types
+        path = content.path
+        fileContent = mockFiles.get(path)
+
+        return new ReadableStream({
+          start(controller) {
+            // Create response event
+            const response: StreamEvent = {
+              type: 'response',
+              task: 'file',
+              content: fileContent
+                ? JSON.stringify({ content: fileContent, path })
+                : JSON.stringify({ error: `File not found: ${path}`, path }),
+              timestamp: Date.now(),
+            }
+
+            // Emit compressed response
+            const compressed = compressAndEncodeMessage(response)
+            controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
+            controller.close()
+          },
+        })
+      }
+    } else {
+      throw new Error('Invalid event type or missing content')
+    }
   }
 
   /**
    * Emit a compressed event
    */
-  emitCompressed(event: StreamMessage): void {
+  emitCompressed(event: StreamEvent): void {
     logger.debug(`Mock stream emitting event: ${JSON.stringify(event)}`)
-    if (event.type === 'edit') {
+    if (event.type === 'response') {
       const stream = this.createMockResponse(event)
       const reader = stream.getReader()
 
@@ -116,28 +183,99 @@ export function setTestMode(): void {
 
   // Mock stream functions
   mock.module('@/stream', () => ({
-    createStreamResponse: (messages: AsyncIterable<StreamMessage>) => {
+    createStreamResponse: (messages: AsyncIterable<StreamEvent>) => {
       const stream = new ReadableStream({
         async start(controller) {
           try {
             for await (const message of messages) {
-              const { path, action } = message.data as { path: string; action: string }
-              const content = mockFiles.get(path)
-              const globError = mockFiles.get(`glob:${path}`)
+              if (message.type === 'response' && message.content) {
+                const decoded = JSON.parse(message.content)
+                if (decoded.type === 'run') {
+                  // Handle command request
+                  const response: StreamEvent = {
+                    type: 'response',
+                    task: 'command',
+                    content: JSON.stringify({
+                      type: 'command_chunk',
+                      data: {
+                        content: 'mock command output',
+                        done: true,
+                      },
+                    }),
+                    timestamp: Date.now(),
+                  }
+                  const compressed = compressAndEncodeMessage(response)
+                  controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
 
-              // Create response event
-              const response: StreamMessage = {
-                type: 'edit',
-                data: globError
-                  ? { path, error: globError }
-                  : content
-                    ? { path, content }
-                    : { path, error: `File not found: ${path}` },
+                  // Send completion
+                  const complete: StreamEvent = {
+                    type: 'response',
+                    task: 'command',
+                    content: JSON.stringify({
+                      type: 'command_complete',
+                      data: {
+                        exitCode: 0,
+                      },
+                    }),
+                    timestamp: Date.now(),
+                  }
+                  const compressedComplete = compressAndEncodeMessage(complete)
+                  controller.enqueue(new TextEncoder().encode(`data: ${compressedComplete}\n\n`))
+                } else if (decoded.type === 'file_request') {
+                  const { paths } = decoded.data
+                  for (const path of paths) {
+                    const globError = mockFiles.get(`glob:${path}`)
+                    const fileContent = mockFiles.get(path)
+
+                    // Create response event
+                    const response: StreamEvent = {
+                      type: 'response',
+                      task: 'file',
+                      content: globError
+                        ? JSON.stringify({ path, error: globError })
+                        : fileContent
+                          ? JSON.stringify({ path, content: fileContent })
+                          : JSON.stringify({ path, error: `File not found: ${path}` }),
+                      timestamp: Date.now(),
+                    }
+
+                    // Emit compressed response
+                    const compressed = compressAndEncodeMessage(response)
+                    controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
+                  }
+                }
+              } else if (message.content && JSON.parse(message.content).type === 'run') {
+                // Handle direct run command
+                const response: StreamEvent = {
+                  type: 'response',
+                  task: 'command',
+                  content: JSON.stringify({
+                    type: 'command_chunk',
+                    data: {
+                      content: 'mock command output',
+                      done: true,
+                    },
+                  }),
+                  timestamp: Date.now(),
+                }
+                const compressed = compressAndEncodeMessage(response)
+                controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
+
+                // Send completion
+                const complete: StreamEvent = {
+                  type: 'response',
+                  task: 'command',
+                  content: JSON.stringify({
+                    type: 'command_complete',
+                    data: {
+                      exitCode: 0,
+                    },
+                  }),
+                  timestamp: Date.now(),
+                }
+                const compressedComplete = compressAndEncodeMessage(complete)
+                controller.enqueue(new TextEncoder().encode(`data: ${compressedComplete}\n\n`))
               }
-
-              // Emit compressed response
-              const compressed = compressAndEncodeMessage(response)
-              controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
             }
           } finally {
             controller.close()
@@ -205,6 +343,6 @@ export function setTestMode(): void {
 }
 
 export function resetTestMode(): void {
-  mockStream.clearMocks()
+  mockFiles.clear()
   mock.restore()
 }

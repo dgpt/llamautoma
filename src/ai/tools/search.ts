@@ -3,13 +3,16 @@ import { tool } from '@langchain/core/tools'
 import { tavily } from '@tavily/core'
 
 // Initialize Tavily client
-const { search } = tavily({
-  apiKey: process.env.TAVILY_API_KEY || '',
-})
+const { search } =
+  process.env.NODE_ENV === 'test'
+    ? require('@/tests/unit/mocks/tavily').getTavily()
+    : tavily({
+        apiKey: process.env.TAVILY_API_KEY || '',
+      })
 
 // Schema for search input
 const searchInputSchema = z.object({
-  query: z.string(),
+  query: z.string().min(1, 'Search query cannot be empty'),
   searchDepth: z.enum(['basic', 'advanced']).optional(),
 })
 
@@ -33,6 +36,11 @@ export const searchTool = tool(
   async (input: z.infer<typeof searchInputSchema>) => {
     try {
       const { query, searchDepth = 'basic' } = input
+
+      // Validate query is not empty
+      if (!query.trim()) {
+        throw new Error('Search query cannot be empty')
+      }
 
       const response = await search(query, {
         searchDepth,

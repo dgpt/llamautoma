@@ -4,13 +4,19 @@ import { tavily } from '@tavily/core'
 import { logger } from '@/logger'
 
 // Initialize Tavily client
-const { extract } = tavily({
-  apiKey: process.env.TAVILY_API_KEY || '',
-})
+const { extract } =
+  process.env.NODE_ENV === 'test'
+    ? require('@/tests/unit/mocks/tavily').getTavily()
+    : tavily({
+        apiKey: process.env.TAVILY_API_KEY || '',
+      })
+
+// URL validation schema
+const urlSchema = z.string().url('Invalid URL format')
 
 // Schema for extract input
 const extractInputSchema = z.object({
-  urls: z.array(z.string()),
+  urls: z.array(urlSchema).min(1, 'URLs array cannot be empty'),
 })
 
 // Schema for extract output
@@ -34,10 +40,38 @@ const extractOutputSchema = z.object({
 export const extractTool = tool(
   async (input: z.infer<typeof extractInputSchema>) => {
     try {
-      const response = await extract(input.urls)
+      // Validate URLs array is not empty
+      if (input.urls.length === 0) {
+        throw new Error('URLs array cannot be empty')
+      }
 
-      // Validate output against schema
-      const result = extractOutputSchema.parse(response)
+      // Track failed extractions
+      const results: { url: string; rawContent: string }[] = []
+      const failedResults: { url: string; error: string }[] = []
+
+      // Process each URL
+      for (const url of input.urls) {
+        try {
+          const response = await extract([url])
+          if (response.results && response.results.length > 0) {
+            results.push(...response.results)
+          } else {
+            failedResults.push({ url, error: 'No content extracted' })
+          }
+        } catch (error) {
+          failedResults.push({
+            url,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+
+      // Construct response
+      const result = extractOutputSchema.parse({
+        results,
+        failedResults,
+        responseTime: Date.now(),
+      })
 
       // Return formatted result with plain text content for LLM readability
       return JSON.stringify(result, null, 2)

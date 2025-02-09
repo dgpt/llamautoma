@@ -1,118 +1,104 @@
 import { z } from 'zod'
 import { tool } from '@langchain/core/tools'
-import { streamToClient, waitForClientResponse } from '../../stream'
+import { compressAndEncodeMessage, decodeAndDecompressMessage } from '@/lib/compression'
 import { logger } from '@/logger'
+import { createStreamResponse } from '@/stream'
+import type { StreamMessage } from '@/stream'
 
-// Schema for run command input
-const runInputSchema = z.object({
-  command: z.string(),
+const commandInputSchema = z.object({
+  command: z.string().min(1),
+  timeout: z.number().optional(),
   cwd: z.string().optional(),
   env: z.record(z.string()).optional(),
-  timeout: z.number().optional(),
 })
 
-// Schema for command output chunk
-const CommandChunkSchema = z.object({
+const commandOutputChunkSchema = z.object({
   type: z.literal('command_chunk'),
   data: z.object({
     content: z.string(),
     done: z.boolean(),
-    error: z.string().optional(),
   }),
 })
 
-// Schema for completion response
-const CommandCompleteSchema = z.object({
+const commandCompleteSchema = z.object({
   type: z.literal('command_complete'),
   data: z.object({
     exitCode: z.number(),
-    signal: z.string().optional(),
   }),
 })
 
-// Schema for error response
-const ErrorResponseSchema = z.object({
-  type: z.literal('error'),
-  error: z.string(),
-})
-
-// Combined response schema
-const ResponseSchema = z.discriminatedUnion('type', [
-  CommandChunkSchema,
-  CommandCompleteSchema,
-  ErrorResponseSchema,
-])
-
-export type CommandResponse = {
-  output: string
-  exitCode: number
-  signal?: string
-  error?: string
-}
-
-// Create the run tool using LangChain's tool function
 export const runTool = tool(
-  async (input: z.infer<typeof runInputSchema>) => {
+  async (input: z.infer<typeof commandInputSchema>) => {
     try {
-      // Format request for client
-      const clientRequest = {
-        type: 'command_request',
-        data: {
-          command: input.command,
-          cwd: input.cwd,
-          env: input.env,
-          timeout: input.timeout,
-        },
+      const { command, timeout, cwd, env } = input
+
+      // Create async generator for stream messages
+      async function* generateMessages(): AsyncGenerator<StreamMessage> {
+        yield {
+          type: 'run',
+          data: {
+            command,
+            timeout,
+            cwd,
+            env,
+          },
+        }
       }
 
-      // Stream request to client
-      await streamToClient(clientRequest)
+      // Get response stream
+      const response = await createStreamResponse(generateMessages())
 
-      // Collect command output
-      const response: CommandResponse = {
-        output: '',
-        exitCode: 0,
+      if (!response.ok || !response.body) {
+        throw new Error('Failed to execute command')
       }
 
-      while (true) {
-        const chunk = await waitForClientResponse<z.infer<typeof ResponseSchema>>()
-        if (!chunk) {
-          logger.error('No response received from client')
-          throw new Error('No response received from client')
-        }
+      const reader = response.body.getReader()
+      let output = ''
+      let exitCode: number | undefined
 
-        // Validate response
-        const result = ResponseSchema.safeParse(chunk)
-        if (!result.success) {
-          logger.error({ error: result.error }, 'Invalid response from client')
-          throw new Error('Invalid response from client')
-        }
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
 
-        switch (result.data.type) {
-          case 'command_chunk':
-            const { content, error } = result.data.data
+          const decoder = new TextDecoder()
+          const chunk = decoder.decode(value)
+          const messages = chunk.split('\n\n')
 
-            // Handle error
-            if (error) {
-              response.error = error
-              continue
+          for (const message of messages) {
+            if (!message.startsWith('data: ')) continue
+
+            try {
+              const decoded = decodeAndDecompressMessage(message.slice(6))
+              if ('content' in decoded && decoded.content) {
+                const parsedContent = JSON.parse(decoded.content)
+
+                if (commandOutputChunkSchema.safeParse(parsedContent).success) {
+                  output += parsedContent.data.content
+                }
+              } else if (decoded.type === 'complete' && decoded.responses) {
+                const completeResponse = decoded.responses[0]
+                if (commandCompleteSchema.safeParse(completeResponse).success) {
+                  exitCode = completeResponse.data.exitCode
+                }
+              }
+            } catch (error) {
+              logger.error('Failed to parse command response:', error)
             }
-
-            // Append output
-            response.output += content
-            break
-
-          case 'command_complete':
-            // Command finished
-            response.exitCode = result.data.data.exitCode
-            response.signal = result.data.data.signal
-            return JSON.stringify(response, null, 2)
-
-          case 'error':
-            logger.error({ error: result.data.error }, 'Error from client')
-            throw new Error(result.data.error)
+          }
         }
+      } finally {
+        reader.releaseLock()
       }
+
+      if (typeof exitCode !== 'number') {
+        throw new Error('Stream ended without completion')
+      }
+
+      return JSON.stringify({
+        output,
+        exitCode,
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logger.error({ error }, 'Run tool error')
@@ -121,7 +107,7 @@ export const runTool = tool(
   },
   {
     name: 'run',
-    description: 'Execute shell commands in the client workspace',
-    schema: runInputSchema,
+    description: 'Run a shell command in the client workspace',
+    schema: commandInputSchema,
   }
 )

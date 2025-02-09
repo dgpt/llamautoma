@@ -37,18 +37,28 @@ const mockSearch = mock(async (query: string, options?: { searchDepth?: 'basic' 
 })
 
 const mockExtract = mock(async (urls: string[]) => {
-  return {
-    ...mockExtractResults,
-    results: urls.map(url => ({
-      url,
-      rawContent: `Mock content for ${url}`,
-    })),
-    failedResults: urls
-      .filter(url => !url.startsWith('http'))
-      .map(url => ({
+  const results = []
+  const failedResults = []
+
+  for (const url of urls) {
+    try {
+      new URL(url)
+      results.push({
         url,
-        error: 'Invalid URL',
-      })),
+        rawContent: `Mock content for ${url}`,
+      })
+    } catch {
+      failedResults.push({
+        url,
+        error: 'Invalid URL format',
+      })
+    }
+  }
+
+  return {
+    results,
+    failedResults,
+    responseTime: Date.now(),
   }
 })
 

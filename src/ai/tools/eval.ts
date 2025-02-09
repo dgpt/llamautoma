@@ -54,6 +54,24 @@ function createOutputCapture(maxOutputLength: number) {
   }
 }
 
+// Remove TypeScript types and interfaces from code
+function stripTypeScript(code: string): string {
+  // Remove interface declarations
+  code = code.replace(/interface\s+\w+\s*{[^}]*}/g, '')
+  // Remove type annotations
+  code = code.replace(/:\s*[^=,;)}\]]+/g, '')
+  // Remove type assertions
+  code = code.replace(/as\s+[^=,;)}\]]+/g, '')
+  // Clean up any leftover whitespace
+  code = code.replace(/\s+/g, ' ').trim()
+  // Fix object literals
+  code = code.replace(/{\s*([^}]*)\s*}/g, (match, inner) => {
+    // Remove type annotations from object literals
+    return '{' + inner.replace(/:\s*[^=,}]+(?=[,}])/g, '') + '}'
+  })
+  return code
+}
+
 // Create the eval tool using LangChain's tool function
 export const evalTool = tool(
   async (input: z.infer<typeof evalInputSchema>) => {
@@ -75,9 +93,10 @@ export const evalTool = tool(
         lastValue: undefined,
       }
 
-      // Execute code
+      // Strip TypeScript and execute code
+      const strippedCode = stripTypeScript(input.code)
       const result = runInContext(
-        `function main() { ${input.code} } main()`,
+        `function main() { ${strippedCode} } main()`,
         createContext(context)
       )
       context.lastValue = result
