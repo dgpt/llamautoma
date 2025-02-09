@@ -1,60 +1,58 @@
 import { z } from 'zod'
+import { BaseMessage } from '@langchain/core/messages'
 
 /**
- * Base event schema that all events must follow
+ * Types of messages that can be sent from server to client
  */
-export const BaseEventSchema = z.object({
-  type: z.enum(['response', 'progress', 'error', 'complete']).describe('Type of stream event'),
-  task: z.string().describe('Task that generated this event'),
-  timestamp: z.number().describe('When the event was generated'),
+export type ServerToClientMessageType =
+  | 'edit'
+  | 'run'
+  | 'chat'
+  | 'status'
+  | 'progress'
+  | 'task'
+  | 'code'
+  | 'complete'
+
+/**
+ * Types of messages that can be sent from client to server
+ */
+export type ClientToServerMessageType = 'input' | 'cancel' | 'confirm' | 'reject'
+
+/**
+ * Message sent from server to client
+ */
+export interface ServerToClientMessage {
+  type: ServerToClientMessageType
+  content?: string
+  data?: unknown
+  messages?: BaseMessage[]
+  response?: unknown
+  metadata?: Record<string, unknown>
+  timestamp: number
+}
+
+/**
+ * Message sent from client to server
+ */
+export interface ClientToServerMessage {
+  type: ClientToServerMessageType
+  data: unknown
+  metadata?: Record<string, unknown>
+  timestamp: number
+}
+
+/**
+ * Schema for stream events
+ */
+export const StreamEventSchema = z.object({
+  type: z.enum(['edit', 'run', 'chat', 'status', 'progress', 'task', 'code', 'complete']),
+  content: z.string().optional(),
+  data: z.unknown().optional(),
+  messages: z.array(z.any()).optional(),
+  response: z.unknown().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  timestamp: z.number(),
 })
-
-/**
- * Schema for response events (shown in chat window)
- */
-export const ResponseEventSchema = BaseEventSchema.extend({
-  type: z.literal('response'),
-  content: z.string().describe('Content to display'),
-  metadata: z.record(z.any()).optional().describe('Optional metadata about the response'),
-})
-
-/**
- * Schema for progress events (shown at bottom of chat)
- */
-export const ProgressEventSchema = BaseEventSchema.extend({
-  type: z.literal('progress'),
-  status: z.string().describe('Current status message'),
-})
-
-/**
- * Schema for error events
- */
-export const ErrorEventSchema = BaseEventSchema.extend({
-  type: z.literal('error'),
-  error: z.string().describe('Error message'),
-})
-
-/**
- * Schema for completion events
- */
-export const CompleteEventSchema = BaseEventSchema.extend({
-  type: z.literal('complete'),
-  final_status: z.string().optional().describe('Final status message'),
-  responses: z.array(z.any()).optional().describe('Collection of responses from the task'),
-})
-
-/**
- * Union of all possible event types
- */
-export const StreamEventSchema = z.discriminatedUnion('type', [
-  ResponseEventSchema,
-  ProgressEventSchema,
-  ErrorEventSchema,
-  CompleteEventSchema,
-])
 
 export type StreamEvent = z.infer<typeof StreamEventSchema>
-export type ResponseEvent = z.infer<typeof ResponseEventSchema>
-export type ProgressEvent = z.infer<typeof ProgressEventSchema>
-export type ErrorEvent = z.infer<typeof ErrorEventSchema>
-export type CompleteEvent = z.infer<typeof CompleteEventSchema>

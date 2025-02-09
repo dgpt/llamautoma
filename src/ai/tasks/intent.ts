@@ -2,6 +2,8 @@ import { BaseMessage, HumanMessage, SystemMessage, MessageContent } from '@langc
 import { z } from 'zod'
 import { createStructuredLLM } from '@/ai/llm'
 import { logger } from '@/logger'
+import { task } from '@langchain/langgraph'
+import { RunnableConfig } from '@langchain/core/runnables'
 
 // Schema for intent classification
 const IntentSchema = z.object({
@@ -40,64 +42,74 @@ function getMessageString(content: MessageContent): string {
  * @returns Classification of the intent as either code generation or natural conversation
  * @throws Error if no user message is found
  */
-export async function intentTask({ messages }: { messages: BaseMessage[] }): Promise<Intent> {
-  // Find the last user message
-  const lastUserMessage = [...messages].reverse().find(msg => msg instanceof HumanMessage)
-  if (!lastUserMessage) {
-    throw new Error('No user message found in conversation history')
-  }
+export const intentTask = task(
+  'intent',
+  async (
+    input: {
+      messages: BaseMessage[]
+    },
+    config?: RunnableConfig
+  ): Promise<Intent> => {
+    // Find the last user message
+    const lastUserMessage = [...input.messages].reverse().find(msg => msg instanceof HumanMessage)
+    if (!lastUserMessage) {
+      throw new Error('No user message found in conversation history')
+    }
 
-  const messageString = getMessageString(lastUserMessage.content)
+    const messageString = getMessageString(lastUserMessage.content)
 
-  const prompt = `You are an assistant that must analyze a message and determine its intent.
+    const prompt = `You are an assistant that must analyze a message and determine its intent.
 
-To determine "chat":
-- the message does not require you to write code
-- the message is asking a question
-- the message doesn't provide a specific action
-- the message is asking you to do something that does not require you to write code
-- the message is implying that they want you to chat with them
-- the message is a question about the codebase, workspace, directory, file, etc.
-  - in this case, you can use the file tool to answer the question
-- the message is something you can answer by searching the internet
-  - use the search tool to find a website
-  - use the extract tool to extract information from a website
+Your task is to classify the message into one of two categories:
+1. "chat" - for natural conversation and questions
+2. "code" - for code-related requests and actions
 
-if any of the above are true, you MUST respond with:
+You MUST respond with a JSON object containing:
+- "type": either "chat" or "code"
+- "explanation": a brief explanation of your classification
+
+Examples of valid responses:
+
+For a chat message:
 {
   "type": "chat",
-  "explanation": <a brief explanation of your thought process>
+  "explanation": "This is a general question about programming concepts that doesn't require writing code."
 }
 
----------------------------------
-
-To determine "code":
-- the message provides a specific action
-- the message is implying or asking you to write code
-- the message is asking you to fix a bug
-- the message is asking you to write a test
-- the message is asking you to implement a feature
-
-if any of the above are true, you MUST respond with:
+For a code request:
 {
   "type": "code",
-  "explanation": <a brief explanation of your thought process>
+  "explanation": "The user is asking for a specific code implementation of a feature."
 }
 
----------------------------------
+Guidelines for classification:
 
-You MUST consider all of these factors when determining the intent.
-You MUST provide a well thought out explanation for your choice.
-You MUST consider all possible factors when determining the intent.
+"chat" type messages:
+- General questions about concepts
+- Questions about the codebase or workspace
+- Requests for explanations
+- Non-coding tasks
+- Information seeking queries
 
-MOST IMPORTANT:
-You MUST respond in JSON format with the following structure:
-{
-  "type": <"chat" or "code">,
-  "explanation": <a brief explanation of your thought process>
-}`
+"code" type messages:
+- Requests to write or modify code
+- Bug fixes
+- Test writing
+- File operations
+- Implementation requests
+- Debugging help
 
-  const result = await intent.invoke([new SystemMessage(prompt), new HumanMessage(messageString)])
-  logger.debug(result)
-  return result
-}
+Remember:
+1. ONLY output a single JSON object
+2. The JSON MUST have both "type" and "explanation" fields
+3. "type" MUST be either "chat" or "code"
+4. "explanation" MUST be a string explaining your choice
+5. NO text outside the JSON object
+
+Now analyze this message: "${messageString}"`
+
+    const result = await intent.invoke([new SystemMessage(prompt), new HumanMessage(messageString)])
+    logger.debug(result)
+    return result
+  }
+)

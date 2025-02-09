@@ -1,58 +1,75 @@
-import { afterEach, expect, mock } from 'bun:test'
+import { Mock, mock, afterEach, expect } from 'bun:test'
 import { ChatOllama } from '@langchain/ollama'
 import { MemorySaver, entrypoint } from '@langchain/langgraph'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { compressAndEncodeMessage } from '@/lib/compression'
+import type { ServerMessage } from '@/stream'
 
 // Constants
 export const TEST_TIMEOUT = 60000 // 60 seconds for real model responses
 export const TEST_MODEL = 'qwen2.5-coder:1.5b' // Smaller, faster model for tests
-export const TEST_BASE_URL = 'http://localhost:11434'
-
-type Mock = ReturnType<typeof mock>
-
-// Mock response creation helper
-export const createMockResponse = (data: Record<string, unknown>) => {
-  const encoder = new TextEncoder()
-  const compressed = compressAndEncodeMessage({ type: 'edit', data })
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
-      controller.close()
-    },
-  })
-}
-
-const originalResponse = globalThis.Response
-export const mockStream = (fn: Mock, stream: ReadableStream) => {
-  fn.mockImplementation(() => new originalResponse(stream))
-  globalThis.Response = fn as unknown as typeof Response
-  return fn
-}
-
-export const mockClientResponse = (fn: Mock, data: Record<string, unknown>) => {
-  fn.mockImplementation(() => new originalResponse(createMockResponse(data)))
-  globalThis.Response = fn as unknown as typeof Response
-  return fn
-}
-
-afterEach(() => {
-  mock.restore()
-  globalThis.Response = originalResponse
-})
+export const TEST_HOST = 'http://localhost:11434'
 
 // Test context type
 export interface TestContext {
-  memorySaver: MemorySaver
-  chatModel: ChatOllama
   threadId: string
-  config: RunnableConfig
+  memorySaver: MemorySaver
 }
 
-// Create test LLM
-export const testLLM = new ChatOllama({
-  model: TEST_MODEL,
-  baseUrl: TEST_BASE_URL,
+// Create test context
+export const createTestContext = (): TestContext => ({
+  threadId: 'test',
+  memorySaver: new MemorySaver(),
+})
+
+// Create test model
+export const createTestModel = (): ChatOllama =>
+  new ChatOllama({
+    model: TEST_MODEL,
+    baseUrl: TEST_HOST,
+  })
+
+/**
+ * Mock a client response with compressed message
+ */
+export const mockClientResponse = (fn: Mock<any>, data: Record<string, unknown>): void => {
+  const message: ServerMessage = {
+    type: 'edit',
+    content: JSON.stringify(data),
+    timestamp: Date.now(),
+  }
+  const compressed = compressAndEncodeMessage(message)
+
+  mockStream(
+    fn,
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
+        controller.close()
+      },
+    })
+  )
+}
+
+/**
+ * Mock a stream response
+ */
+export const mockStream = (fn: Mock<any>, stream: ReadableStream): Mock<any> => {
+  fn.mockImplementation(() => new Response(stream))
+  globalThis.Response = fn as unknown as typeof Response
+  return fn
+}
+
+/**
+ * Reset test mode
+ */
+export const resetTestMode = (): void => {
+  mock.restore()
+}
+
+// Clean up after each test
+afterEach(() => {
+  resetTestMode()
 })
 
 // Create test config
@@ -67,12 +84,10 @@ export const testConfig: RunnableConfig = {
   },
 }
 
-// Helper to create clean test context
-export const createTestContext = (): TestContext => ({
-  memorySaver: new MemorySaver(),
-  chatModel: testLLM,
-  threadId: `test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  config: testConfig,
+// Create test LLM
+export const testLLM = new ChatOllama({
+  model: TEST_MODEL,
+  baseUrl: TEST_HOST,
 })
 
 // Helper to wait for response with timeout

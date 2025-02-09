@@ -21,7 +21,7 @@ import { getMessageString } from './tasks/lib'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { MemorySaver } from '@langchain/langgraph/prebuilt'
 import { TaskTypeSchema } from './tasks/schemas/tasks'
-import { StreamHandler } from '../stream'
+import { BidirectionalStreamHandler } from '../stream'
 import { generateCompressedDiffs } from '../lib/diff'
 import { compressAndEncodeMessage } from '../lib/compression'
 
@@ -66,8 +66,8 @@ const modelWithTools = llm.bindTools(tools)
 // Create memory saver for workflow checkpointing
 const checkpointer = new MemorySaver()
 
-// Create stream handler for client communication
-const streamHandler = new StreamHandler()
+// Initialize stream handler
+const streamHandler = new BidirectionalStreamHandler()
 
 // Task to call model directly for chat
 const chatTask = task('chat', async (messages: BaseMessage[]) => {

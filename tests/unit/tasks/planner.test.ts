@@ -3,7 +3,7 @@ import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messag
 import { entrypoint } from '@langchain/langgraph'
 import { createTestContext, waitForResponse, type TestContext } from '../utils'
 import { plannerTask } from '@/ai/tasks/planner'
-import { PlanSchema, type Plan } from 'llamautoma-types'
+import { PlannerTaskSchema, type PlannerTaskOutput } from '@/ai/tasks/schemas/tasks'
 
 describe('Planner Task Tests', () => {
   let ctx: TestContext
@@ -41,16 +41,22 @@ describe('Planner Task Tests', () => {
         },
       })
     )
-    const plan = result as Plan
+    const plan = result as PlannerTaskOutput
 
-    expect(() => PlanSchema.parse(plan)).not.toThrow()
+    expect(() => PlannerTaskSchema.parse(plan)).not.toThrow()
     expect(plan.response).toBeDefined()
+    expect(plan.plan).toBeDefined()
     expect(plan.steps).toBeDefined()
-    expect(Array.isArray(plan.steps)).toBe(true)
-    expect(plan.steps!.length).toBeGreaterThan(0)
+    if (plan.steps) {
+      expect(Array.isArray(plan.steps)).toBe(true)
+      expect(plan.steps.length).toBeGreaterThan(0)
+      expect(plan.steps[0]).toHaveProperty('step')
+      expect(plan.steps[0]).toHaveProperty('description')
+      expect(plan.steps[0]).toHaveProperty('status')
+    }
   })
 
-  test('should incorporate review feedback into plan', async () => {
+  test('should handle complex code generation request', async () => {
     const workflow = entrypoint(
       {
         checkpointer: ctx.memorySaver,
@@ -59,20 +65,6 @@ describe('Planner Task Tests', () => {
       async (messages: BaseMessage[]) => {
         const result = await plannerTask({
           messages,
-          review: {
-            approved: false,
-            feedback: 'Add password validation and error handling',
-            suggestions: [
-              {
-                step: 'Add password validation',
-                action: 'Implement password strength requirements and validation',
-              },
-              {
-                step: 'Add error handling',
-                action: 'Add proper error handling for form submission and validation',
-              },
-            ],
-          },
         })
         return result
       }
@@ -80,7 +72,9 @@ describe('Planner Task Tests', () => {
 
     const messages = [
       new SystemMessage('You are a code generation assistant.'),
-      new HumanMessage('Create a user registration form'),
+      new HumanMessage(
+        'Create a user registration form with password validation and error handling. Include proper form submission handling and validation feedback.'
+      ),
     ]
 
     const result = await waitForResponse(
@@ -91,12 +85,18 @@ describe('Planner Task Tests', () => {
         },
       })
     )
-    const plan = result as Plan
+    const plan = result as PlannerTaskOutput
 
-    expect(() => PlanSchema.parse(plan)).not.toThrow()
+    expect(() => PlannerTaskSchema.parse(plan)).not.toThrow()
     expect(plan.response).toBeDefined()
+    expect(plan.plan).toBeDefined()
     expect(plan.steps).toBeDefined()
-    expect(Array.isArray(plan.steps)).toBe(true)
-    expect(plan.steps!.length).toBeGreaterThan(0)
+    if (plan.steps) {
+      expect(Array.isArray(plan.steps)).toBe(true)
+      expect(plan.steps.length).toBeGreaterThan(0)
+      expect(plan.steps[0]).toHaveProperty('step')
+      expect(plan.steps[0]).toHaveProperty('description')
+      expect(plan.steps[0]).toHaveProperty('status')
+    }
   })
 })

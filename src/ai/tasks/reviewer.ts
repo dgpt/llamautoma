@@ -1,10 +1,11 @@
-import { task } from '@langchain/langgraph'
-import { BaseMessage } from '@langchain/core/messages'
-import { RunnableConfig } from '@langchain/core/runnables'
 import { llm } from '../llm'
 import { getMessageString } from '../tasks/lib'
-import { updateProgress, sendTaskResponse, sendTaskComplete } from '../../stream'
+import { broadcastProgress, broadcastMessage } from '../../stream'
+import { BaseMessage, HumanMessage } from '@langchain/core/messages'
+import { task } from '@langchain/langgraph'
 import { ReviewerTaskSchema } from './schemas/tasks'
+import { z } from 'zod'
+import type { RunnableConfig as LlamautomaConfig } from '@/types'
 
 /**
  * Reviews generated code or plans to ensure they meet requirements
@@ -14,79 +15,108 @@ export const reviewerTask = task(
   async (
     input: {
       messages: BaseMessage[]
-      plan?: string
-      code?: { files: any[] }
+      files: Record<string, string>
     },
-    config?: RunnableConfig
+    config?: LlamautomaConfig
   ) => {
-    const type = input.code ? 'code' : 'plan'
-    const contentToReview = input.code
-      ? JSON.stringify(input.code.files, null, 2)
-      : input.plan
-        ? input.plan
-        : ''
-
-    if (!contentToReview) {
-      throw new Error('Either plan or code must be provided')
-    }
-
     // Update initial progress
-    updateProgress('reviewer', `Reviewing ${type}...`, config)
+    broadcastProgress('Reviewing code...', config?.configurable)
 
     // Convert messages to string for context
     const context = input.messages.map(getMessageString).join('\n')
 
     // Generate review using LLM
-    const response = await llm.invoke(
-      `Review the following ${type} to ensure it meets the requirements:
-
-      CONVERSATION CONTEXT:
+    const prompt = `
+      CONTEXT:
       ${context}
 
-      ${type.toUpperCase()} TO REVIEW:
-      ${contentToReview}
+      FILES TO REVIEW:
+      ${Object.entries(input.files)
+        .map(([path, content]) => `FILE: ${path}\n\`\`\`\n${content}\n\`\`\``)
+        .join('\n\n')}
+
+      Review the code above and provide feedback. Consider:
+      1. Code quality and readability
+      2. Error handling and edge cases
+      3. Performance and efficiency
+      4. Security considerations
+      5. Testing and maintainability
 
       Respond with:
-      1. Whether the ${type} is approved (yes/no)
-      2. Detailed feedback if not approved
+      1. Overall assessment (approved/rejected)
+      2. Detailed feedback
       3. Specific suggestions for improvement
+    `
 
-      Keep the review thorough but concise.`
-    )
-
-    // Parse response
-    const content =
+    const response = await llm.invoke([new HumanMessage(prompt)])
+    const responseContent =
       typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
-    const [decision, feedback, ...suggestionLines] = content.split('\n\n')
 
-    // Parse decision
-    const approved = decision.toLowerCase().includes('yes')
-
-    // Parse suggestions
-    const suggestions = suggestionLines
-      .join('\n\n')
-      .split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const [step, action] = line.split(':').map(s => s.trim())
-        return { step, action }
-      })
-
-    // Create structured response
-    const result = ReviewerTaskSchema.parse({
-      approved,
-      feedback: feedback || undefined,
-      suggestions: suggestions.length > 0 ? suggestions : undefined,
-      response: {
-        content: approved ? 'Review passed ✓' : feedback,
-        type: approved ? 'success' : 'warning',
-        shouldDisplay: true,
-      },
-    })
+    // Parse response into review format
+    const approved = responseContent.toLowerCase().includes('approved')
+    const feedback = responseContent.split('\n').slice(1).join('\n').trim()
 
     // Update progress with completion
-    sendTaskComplete('reviewer', approved ? 'Review approved' : 'Review rejected')
+    broadcastMessage(`Review ${approved ? 'approved' : 'rejected'}`, config?.configurable)
 
-    return result
+    // Return result in expected schema format
+    return ReviewerTaskSchema.parse({
+      approved: approved,
+      feedback: feedback,
+      suggestions: extractSuggestions(feedback),
+      metrics: {
+        quality: 0,
+        coverage: 0,
+        complexity: 0,
+      },
+      response: {
+        content: responseContent,
+        type: 'review',
+        shouldDisplay: true,
+        priority: 75,
+        timestamp: Date.now(),
+      },
+    })
   }
 )
+
+function extractSuggestions(feedback: string): Array<{ step: string; action: string }> {
+  const suggestions: Array<{ step: string; action: string }> = []
+  const lines = feedback.split('\n')
+
+  for (const line of lines) {
+    const match = line.match(/^(\d+\.\s*|\-\s*)(.*?):\s*(.*)$/)
+    if (match) {
+      suggestions.push({
+        step: match[2].trim(),
+        action: match[3].trim(),
+      })
+    }
+  }
+
+  return suggestions
+}
+
+// Schema for reviewer output
+const ReviewerOutputSchema = z.object({
+  approved: z.boolean().describe('Whether the code or plan meets requirements'),
+  feedback: z.string().describe('Detailed feedback about the code or plan'),
+  suggestions: z
+    .array(
+      z.object({
+        step: z.string().describe('The area or component to improve'),
+        action: z.string().describe('What needs to be done'),
+        priority: z.enum(['high', 'medium', 'low']).describe('Priority of the suggestion'),
+      })
+    )
+    .describe('Specific suggestions for improvement')
+    .optional(),
+  metrics: z
+    .object({
+      quality: z.number().min(0).max(100).describe('Overall code quality score'),
+      coverage: z.number().min(0).max(100).describe('Test coverage score'),
+      complexity: z.number().min(0).max(100).describe('Code complexity score'),
+    })
+    .describe('Quantitative metrics about the code')
+    .optional(),
+})

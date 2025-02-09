@@ -1,11 +1,8 @@
 import { BaseMessage, SystemMessage, AIMessage } from '@langchain/core/messages'
 import { llm } from '../llm'
 import { logger } from '@/logger'
-
-export interface SummarizerResult {
-  messages: BaseMessage[]
-  summary: string
-}
+import type { SummarizerTaskOutput } from './schemas/tasks'
+import type { TaskResponseContent } from 'llamautoma-types'
 
 /**
  * Safely gets the string content from a message
@@ -24,7 +21,7 @@ export const summarizerTask = async ({
 }: {
   messages: BaseMessage[]
   maxContextTokens: number
-}): Promise<SummarizerResult> => {
+}): Promise<SummarizerTaskOutput> => {
   // Separate system messages from other messages
   const systemMessages = messages.filter(msg => msg instanceof SystemMessage)
   const nonSystemMessages = messages.filter(msg => !(msg instanceof SystemMessage))
@@ -38,8 +35,16 @@ export const summarizerTask = async ({
   // If under token limit, return as is
   if (totalTokens <= maxContextTokens) {
     return {
-      messages: messages,
+      messages,
       summary: '',
+      response: {
+        type: 'info',
+        content: 'No summarization needed - conversation within token limit.',
+        shouldDisplay: true,
+        timestamp: Date.now(),
+        priority: 50,
+      },
+      streamResponses: [],
     }
   }
 
@@ -74,5 +79,13 @@ ${messageText}`,
   return {
     messages: [...systemMessages, new AIMessage({ content: summaryContent })],
     summary: summaryContent,
+    response: {
+      type: 'info',
+      content: 'Conversation summarized successfully.',
+      shouldDisplay: true,
+      timestamp: Date.now(),
+      priority: 50,
+    },
+    streamResponses: [],
   }
 }
