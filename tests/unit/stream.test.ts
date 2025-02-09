@@ -1,9 +1,9 @@
 import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
 import {
-  createOutboundStream,
-  createStreamResponse,
-  readInboundStream,
+  createServerResponse,
+  listen,
   StreamManager,
+  streamManager,
   type ServerToClientMessage,
   type ClientToServerMessage,
 } from '@/stream'
@@ -22,7 +22,7 @@ describe('Stream Library', () => {
     mock.restore()
   })
 
-  describe('createStreamResponse', () => {
+  describe('createServerResponse', () => {
     test('should create SSE response with proper headers', () => {
       const messages = {
         [Symbol.asyncIterator]: async function* () {
@@ -30,7 +30,7 @@ describe('Stream Library', () => {
         },
       }
 
-      const response = createStreamResponse(messages)
+      const response = createServerResponse(messages)
       expect(response).toBeInstanceOf(Response)
       expect(response.headers.get('Content-Type')).toBe('text/event-stream')
       expect(response.headers.get('Cache-Control')).toBe('no-cache')
@@ -49,7 +49,7 @@ describe('Stream Library', () => {
         },
       }
 
-      const response = createStreamResponse(messages)
+      const response = createServerResponse(messages)
       const reader = response.body!.getReader()
       const { value } = await reader.read()
       const text = new TextDecoder().decode(value)
@@ -58,30 +58,31 @@ describe('Stream Library', () => {
       expect(decoded).toEqual(testMessage)
     })
 
-    test('should handle stream errors gracefully', async () => {
+    test('should handle stream errors', async () => {
       const messages = {
         [Symbol.asyncIterator]: async function* () {
           throw new Error('test error')
         },
       }
 
-      const response = createStreamResponse(messages)
+      const response = createServerResponse(messages)
       const reader = response.body!.getReader()
-      const result = await reader.read()
-      expect(result.done).toBe(true)
+      const { done } = await reader.read()
+      expect(done).toBe(true)
     })
   })
 
-  describe('readInboundStream', () => {
-    test('should decode compressed messages', async () => {
+  describe('listen', () => {
+    test('should decode client messages', async () => {
       const testMessage: ClientToServerMessage = {
         type: 'input',
         data: 'test',
         timestamp: Date.now(),
       }
-      const compressed = compressAndEncodeMessage(testMessage)
+
       const stream = new ReadableStream({
         start(controller) {
+          const compressed = compressAndEncodeMessage(testMessage)
           controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
           controller.close()
         },
@@ -89,12 +90,28 @@ describe('Stream Library', () => {
 
       const reader = stream.getReader()
       const messages: ClientToServerMessage[] = []
-      for await (const message of readInboundStream(reader)) {
+      for await (const message of listen(reader)) {
         messages.push(message)
       }
 
       expect(messages).toHaveLength(1)
       expect(messages[0]).toEqual(testMessage)
+    })
+
+    test('should handle stream errors', async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error('test error'))
+        },
+      })
+
+      const reader = stream.getReader()
+      const messages: ClientToServerMessage[] = []
+      for await (const message of listen(reader)) {
+        messages.push(message)
+      }
+
+      expect(messages).toHaveLength(0)
     })
 
     test('should handle invalid messages', async () => {
@@ -107,23 +124,7 @@ describe('Stream Library', () => {
 
       const reader = stream.getReader()
       const messages: ClientToServerMessage[] = []
-      for await (const message of readInboundStream(reader)) {
-        messages.push(message)
-      }
-
-      expect(messages).toHaveLength(0)
-    })
-
-    test('should handle stream errors', async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.error(new Error('test error'))
-        },
-      })
-
-      const reader = stream.getReader()
-      const messages: ClientToServerMessage[] = []
-      for await (const message of readInboundStream(reader)) {
+      for await (const message of listen(reader)) {
         messages.push(message)
       }
 
@@ -132,7 +133,7 @@ describe('Stream Library', () => {
   })
 
   describe('StreamManager', () => {
-    test('should add and remove message handlers', () => {
+    test('should add and remove outbound message handlers', () => {
       const manager = new StreamManager()
       const handler = mock(() => {})
 
@@ -145,7 +146,7 @@ describe('Stream Library', () => {
       expect(handler).toHaveBeenCalledTimes(1)
     })
 
-    test('should handle handler errors', () => {
+    test('should handle outbound handler errors', () => {
       const manager = new StreamManager()
       const handler = () => {
         throw new Error('test error')
@@ -157,47 +158,7 @@ describe('Stream Library', () => {
       ).not.toThrow()
     })
 
-    test('should stream messages to handlers', async () => {
-      const manager = new StreamManager()
-      const handler = mock(() => {})
-      const messages = {
-        [Symbol.asyncIterator]: async function* () {
-          yield { type: 'chat', content: 'test1', timestamp: Date.now() } as ServerToClientMessage
-          yield { type: 'chat', content: 'test2', timestamp: Date.now() } as ServerToClientMessage
-        },
-      }
-
-      manager.onOutboundMessage(handler)
-      const received: ServerToClientMessage[] = []
-      for await (const message of manager.streamOutbound(messages)) {
-        received.push(message)
-      }
-
-      expect(handler).toHaveBeenCalledTimes(2)
-      expect(received).toHaveLength(2)
-    })
-
-    test('should handle stream errors in handlers', async () => {
-      const manager = new StreamManager()
-      const handler = () => {
-        throw new Error('test error')
-      }
-      const messages = {
-        [Symbol.asyncIterator]: async function* () {
-          yield { type: 'chat', content: 'test', timestamp: Date.now() } as ServerToClientMessage
-        },
-      }
-
-      manager.onOutboundMessage(handler)
-      const received: ServerToClientMessage[] = []
-      for await (const message of manager.streamOutbound(messages)) {
-        received.push(message)
-      }
-
-      expect(received).toHaveLength(1)
-    })
-
-    test('should add and remove inbound message handlers', () => {
+    test('should add and remove inbound message handlers', async () => {
       const manager = new StreamManager()
       const handler = mock(() => {})
 
@@ -218,20 +179,13 @@ describe('Stream Library', () => {
       })
 
       // Start reading from the stream
-      manager.startInboundStream('test', stream.getReader())
+      await manager.startInboundStream('test', stream.getReader())
+      expect(handler).toHaveBeenCalledTimes(1)
+      expect(handler).toHaveBeenCalledWith(testMessage)
 
-      // Wait for the stream to process
-      setTimeout(() => {
-        expect(handler).toHaveBeenCalledTimes(1)
-        expect(handler).toHaveBeenCalledWith(testMessage)
-
-        manager.offInboundMessage(handler)
-        manager.startInboundStream('test2', stream.getReader())
-
-        setTimeout(() => {
-          expect(handler).toHaveBeenCalledTimes(1)
-        }, 100)
-      }, 100)
+      manager.offInboundMessage(handler)
+      await manager.startInboundStream('test2', stream.getReader())
+      expect(handler).toHaveBeenCalledTimes(1)
     })
 
     test('should handle inbound stream errors', async () => {
@@ -283,8 +237,8 @@ describe('Stream Library', () => {
       })
 
       // Start both streams
-      manager.startInboundStream('stream1', stream1.getReader())
-      manager.startInboundStream('stream2', stream2.getReader())
+      await manager.startInboundStream('stream1', stream1.getReader())
+      await manager.startInboundStream('stream2', stream2.getReader())
 
       // Stop one stream
       await manager.stopStream('stream1')
@@ -293,6 +247,12 @@ describe('Stream Library', () => {
       // Stop all streams
       await manager.stopAllStreams()
       expect(handler).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('streamManager singleton', () => {
+    test('should be exported and ready to use', () => {
+      expect(streamManager).toBeInstanceOf(StreamManager)
     })
   })
 })
