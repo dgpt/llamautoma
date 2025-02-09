@@ -1,14 +1,16 @@
 import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
 import { fileTool } from '@/ai/tools/file'
+import * as fileLib from '@/lib/file'
 
 describe('File Tool', () => {
   const originalResponse = globalThis.Response
-  let currentMock: ReturnType<typeof mock>
+  let mockResponse: ReturnType<typeof mock>
   let mockFileSystem: Map<string, string> = new Map()
+
   beforeEach(() => {
-    currentMock = mock(() => {})
-    currentMock.prototype = originalResponse.prototype
-    globalThis.Response = currentMock as unknown as typeof Response
+    mockResponse = mock(() => {})
+    mockResponse.prototype = originalResponse.prototype
+    globalThis.Response = mockResponse as unknown as typeof Response
 
     // Set up test fixtures
     mockFileSystem.set('test1.txt', 'test file content\n')
@@ -16,10 +18,38 @@ describe('File Tool', () => {
     mockFileSystem.set('test/dir/file.ts', 'test ts file\n')
     mockFileSystem.set('test/dir1/file.ts', 'test ts file 1\n')
     mockFileSystem.set('test/dir2/file.ts', 'test ts file 2\n')
+
+    // Mock the file library
+    mock.module('@/lib/file', () => ({
+      ...fileLib,
+      getFile: async (path: string) => {
+        const content = mockFileSystem.get(path)
+        if (!content) throw new Error('File not found')
+        return content
+      },
+      getDirectory: async (
+        path: string,
+        _config: any,
+        includePattern?: string,
+        excludePattern?: string
+      ) => {
+        const files: Record<string, string> = {}
+        const normalizedPath = path.endsWith('/') ? path : path + '/'
+        for (const [filePath, content] of mockFileSystem.entries()) {
+          if (!filePath.startsWith(normalizedPath)) continue
+          if (includePattern && !filePath.endsWith(includePattern)) continue
+          if (excludePattern && filePath.endsWith(excludePattern)) continue
+          files[filePath] = content
+        }
+        return files
+      },
+    }))
   })
 
   afterEach(() => {
     mockFileSystem.clear()
+    mock.restore()
+    globalThis.Response = originalResponse
   })
 
   test('should handle single file request', async () => {
@@ -150,5 +180,72 @@ describe('File Tool', () => {
         paths: [null as unknown as string],
       })
     ).rejects.toThrow()
+  })
+
+  test('should handle undefined options', async () => {
+    const result = await fileTool.invoke({
+      requestType: 'file',
+      paths: ['test1.txt'],
+    })
+    const parsed = JSON.parse(result)
+    expect(parsed['test1.txt']).toEqual({
+      path: 'test1.txt',
+      content: 'test file content\n',
+    })
+  })
+
+  test('should handle undefined configurable in options', async () => {
+    const result = await fileTool.invoke(
+      {
+        requestType: 'file',
+        paths: ['test1.txt'],
+      },
+      {}
+    )
+    const parsed = JSON.parse(result)
+    expect(parsed['test1.txt']).toEqual({
+      path: 'test1.txt',
+      content: 'test file content\n',
+    })
+  })
+
+  test('should handle non-Error objects in error handling', async () => {
+    // Mock getFile to throw a non-Error object
+    mock.module('@/lib/file', () => ({
+      ...fileLib,
+      getFile: async () => {
+        throw 'Custom error string'
+      },
+      getDirectory: fileLib.getDirectory,
+    }))
+
+    const result = await fileTool.invoke({
+      requestType: 'file',
+      paths: ['test1.txt'],
+    })
+    const parsed = JSON.parse(result)
+    expect(parsed['test1.txt']).toEqual({
+      path: 'test1.txt',
+      error: 'Custom error string',
+    })
+  })
+
+  test('should handle outer try-catch errors', async () => {
+    // Mock JSON.stringify to throw an error
+    const originalStringify = JSON.stringify
+    globalThis.JSON.stringify = () => {
+      throw new Error('JSON error')
+    }
+
+    try {
+      await expect(
+        fileTool.invoke({
+          requestType: 'file',
+          paths: ['test1.txt'],
+        })
+      ).rejects.toThrow('Failed to read files: JSON error')
+    } finally {
+      globalThis.JSON.stringify = originalStringify
+    }
   })
 })
