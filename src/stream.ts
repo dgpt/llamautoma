@@ -6,203 +6,257 @@ import type {
 } from '@/types/stream'
 
 // Re-export types
-export type ServerToClientMessage = ServerMessage
-export type ClientToServerMessage = ClientMessage
+export type { ServerToClientMessage, ClientToServerMessage } from '@/types/stream'
 
 /**
- * Create a server response with proper SSE headers
+ * Create a message stream for bidirectional communication
  */
-export const createServerResponse = (messages: AsyncIterable<ServerToClientMessage>): Response => {
-  const stream = new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder()
-      try {
-        for await (const message of messages) {
-          const compressed = compressAndEncodeMessage(message)
-          controller.enqueue(encoder.encode(`data: ${compressed}\n\n`))
-        }
-      } catch (error) {
-        logger.error('Error in server stream:', error)
-      } finally {
-        controller.close()
-      }
-    },
-  })
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
-  })
-}
-
-/**
- * Listen for messages from client's inbound stream
- */
-export const listen = async function* (
-  reader: ReadableStreamDefaultReader<Uint8Array>
-): AsyncGenerator<ClientToServerMessage> {
+function createMessageStream() {
+  const encoder = new TextEncoder()
   const decoder = new TextDecoder()
-  let buffer = ''
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+  // Message handlers
+  const outboundHandlers = new Set<(message: string) => void>()
+  const inboundHandlers = new Set<(message: ClientMessage) => void>()
 
-      buffer += decoder.decode(value, { stream: true })
-      const messages = buffer.split('\n\n')
-      buffer = messages.pop() || ''
-
-      for (const message of messages) {
-        if (message.startsWith('data: ')) {
-          const data = message.slice(6)
-          try {
-            const decoded = decodeAndDecompressMessage(data)
-            yield decoded as ClientToServerMessage
-          } catch (error) {
-            logger.error('Client stream decoding error:', error)
-          }
-        }
-      }
+  // Active listeners
+  const activeListeners = new Map<
+    string,
+    {
+      reader: ReadableStreamDefaultReader<Uint8Array>
+      buffer: string
     }
-  } finally {
-    reader.releaseLock()
-  }
-}
+  >()
 
-/**
- * Stream manager for handling message broadcasts
- */
-export class StreamManager {
-  private outboundHandlers: ((message: string) => void)[] = []
-  private inboundHandlers: ((message: ClientToServerMessage) => void)[] = []
-  private activeStreams: Map<string, ReadableStreamDefaultReader<Uint8Array>> = new Map()
+  // Response stream controllers
+  const responseControllers = new Set<ReadableStreamController<Uint8Array>>()
 
   /**
-   * Register outbound message handler
+   * Process incoming messages from a buffer
    */
-  onOutboundMessage(handler: (message: string) => void): void {
-    this.outboundHandlers.push(handler)
-  }
-
-  /**
-   * Unregister outbound message handler
-   */
-  offOutboundMessage(handler: (message: string) => void): void {
-    this.outboundHandlers = this.outboundHandlers.filter(h => h !== handler)
-  }
-
-  /**
-   * Register inbound message handler
-   */
-  onInboundMessage(handler: (message: ClientToServerMessage) => void): void {
-    this.inboundHandlers.push(handler)
-  }
-
-  /**
-   * Unregister inbound message handler
-   */
-  offInboundMessage(handler: (message: ClientToServerMessage) => void): void {
-    this.inboundHandlers = this.inboundHandlers.filter(h => h !== handler)
-  }
-
-  /**
-   * Broadcast message to all outbound handlers
-   */
-  broadcast(message: ServerToClientMessage): void {
-    const compressed = compressAndEncodeMessage(message)
-    for (const handler of this.outboundHandlers) {
+  function processMessages(messages: string[]): void {
+    for (const message of messages) {
+      if (!message.startsWith('data: ')) continue
       try {
-        handler(compressed)
-      } catch (error) {
-        logger.error('Stream handler error:', error)
-      }
-    }
-  }
-
-  /**
-   * Start listening to an inbound stream
-   */
-  async startInboundStream(
-    id: string,
-    reader: ReadableStreamDefaultReader<Uint8Array>
-  ): Promise<void> {
-    this.activeStreams.set(id, reader)
-    try {
-      for await (const message of listen(reader)) {
-        for (const handler of this.inboundHandlers) {
+        const decoded = decodeAndDecompressMessage(message.slice(6))
+        for (const handler of inboundHandlers) {
           try {
-            handler(message)
+            handler(decoded)
           } catch (error) {
             logger.error('Inbound handler error:', error)
           }
         }
+      } catch (error) {
+        logger.error('Stream decoding error:', error)
+      }
+    }
+  }
+
+  /**
+   * Start listening to a stream
+   */
+  async function startListening(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    listenerId: string
+  ): Promise<void> {
+    const listener = {
+      reader,
+      buffer: '',
+    }
+    activeListeners.set(listenerId, listener)
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        listener.buffer += decoder.decode(value)
+        const messages = listener.buffer.split('\n\n')
+        listener.buffer = messages.pop() || ''
+
+        processMessages(messages)
       }
     } catch (error) {
-      logger.error('Inbound stream error:', error)
+      logger.error('Stream error:', error)
     } finally {
-      this.activeStreams.delete(id)
+      reader.releaseLock()
+      activeListeners.delete(listenerId)
     }
   }
 
-  /**
-   * Stop a specific stream
-   */
-  async stopStream(id: string): Promise<void> {
-    const reader = this.activeStreams.get(id)
-    if (reader) {
-      try {
-        await reader.cancel()
-      } catch (error) {
-        logger.error('Error stopping stream:', error)
-      } finally {
-        this.activeStreams.delete(id)
+  return {
+    /**
+     * Listen for client messages
+     */
+    listen(reader: ReadableStreamDefaultReader<Uint8Array>): string {
+      const listenerId = Bun.randomUUIDv7()
+      startListening(reader, listenerId).catch(error => {
+        logger.error('Error in stream listener:', error)
+      })
+      return listenerId
+    },
+
+    /**
+     * Stop a specific listener
+     */
+    async stopListener(listenerId: string): Promise<void> {
+      const listener = activeListeners.get(listenerId)
+      if (listener) {
+        try {
+          await listener.reader.cancel()
+        } catch (error) {
+          logger.error('Error stopping listener:', error)
+        } finally {
+          activeListeners.delete(listenerId)
+        }
       }
-    }
+    },
+
+    /**
+     * Stop all listeners
+     */
+    async stopAllListeners(): Promise<void> {
+      const promises = Array.from(activeListeners.entries()).map(([id]) => this.stopListener(id))
+      await Promise.all(promises)
+    },
+
+    /**
+     * Register outbound message handler
+     */
+    onOutboundMessage(handler: (message: string) => void): () => void {
+      outboundHandlers.add(handler)
+      return () => outboundHandlers.delete(handler)
+    },
+
+    /**
+     * Register inbound message handler
+     */
+    onInboundMessage(handler: (message: ClientMessage) => void): () => void {
+      inboundHandlers.add(handler)
+      return () => inboundHandlers.delete(handler)
+    },
+
+    /**
+     * Broadcast a message to all outbound handlers
+     */
+    broadcast(message: string): void {
+      for (const handler of outboundHandlers) {
+        try {
+          handler(message)
+        } catch (error) {
+          logger.error('Outbound handler error:', error)
+        }
+      }
+    },
+
+    /**
+     * Create a server response stream
+     */
+    createResponseStream(): ReadableStream<Uint8Array> {
+      return new ReadableStream({
+        start(controller) {
+          responseControllers.add(controller)
+        },
+        cancel(controller) {
+          responseControllers.delete(controller)
+        },
+      })
+    },
+
+    /**
+     * Write data to all response streams
+     */
+    write(data: string): void {
+      const encoded = encoder.encode(data)
+      for (const controller of responseControllers) {
+        try {
+          controller.enqueue(encoded)
+        } catch (error) {
+          logger.error('Write error:', error)
+          responseControllers.delete(controller)
+        }
+      }
+    },
   }
-
-  /**
-   * Stop all active streams
-   */
-  async stopAllStreams(): Promise<void> {
-    const promises = Array.from(this.activeStreams.keys()).map(id => this.stopStream(id))
-    await Promise.all(promises)
-  }
 }
 
-// Export singleton instance
-export const streamManager = new StreamManager()
+// Create singleton instance
+const messageStream = createMessageStream()
 
 /**
- * Send a message to all registered handlers
+ * Listen for client messages
  */
-export const broadcast = (message: ServerToClientMessage): void => {
-  streamManager.broadcast(message)
+export function listen(reader: ReadableStreamDefaultReader<Uint8Array>): string {
+  return messageStream.listen(reader)
 }
 
 /**
- * Send a chat message to be displayed in the user's chat window
+ * Stop a specific listener
  */
-export const broadcastMessage = (content: string, metadata?: Record<string, unknown>): void => {
-  broadcast({
-    type: 'chat',
-    content,
-    timestamp: Date.now(),
-    metadata,
-  })
+export function stopListener(listenerId: string): Promise<void> {
+  return messageStream.stopListener(listenerId)
 }
 
 /**
- * Send a progress update to be displayed in the status area
+ * Stop all listeners
  */
-export const broadcastProgress = (content: string, metadata?: Record<string, unknown>): void => {
-  broadcast({
+export function stopListening(): Promise<void> {
+  return messageStream.stopAllListeners()
+}
+
+/**
+ * Create a server response stream
+ */
+export function createResponseStream(): ReadableStream<Uint8Array> {
+  return messageStream.createResponseStream()
+}
+
+/**
+ * Write data to all response streams
+ */
+export function write(data: string): void {
+  messageStream.write(data)
+}
+
+/**
+ * Broadcast a message to all outbound handlers
+ */
+export function broadcast(messages: AsyncIterable<ServerMessage>): void {
+  const compressed = compressAndEncodeMessage(messages)
+  messageStream.broadcast(compressed)
+}
+
+/**
+ * Broadcast a progress update
+ */
+export function broadcastProgress(content: string): void {
+  const message: ServerMessage = {
     type: 'progress',
     content,
     timestamp: Date.now(),
-    metadata,
-  })
+  }
+  broadcast(toAsyncIterable([message]))
+}
+
+/**
+ * Broadcast a chat message
+ */
+export function broadcastMessage(content: string): void {
+  const message: ServerMessage = {
+    type: 'chat',
+    content,
+    timestamp: Date.now(),
+  }
+  broadcast(toAsyncIterable([message]))
+}
+
+/**
+ * Convert array to async iterable
+ */
+function toAsyncIterable<T>(arr: T[]): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      yield* arr
+    },
+  }
 }

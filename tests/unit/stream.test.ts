@@ -1,258 +1,310 @@
-import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
+import { expect, test, describe, beforeEach, afterEach } from 'bun:test'
 import {
-  createServerResponse,
   listen,
-  StreamManager,
-  streamManager,
-  type ServerToClientMessage,
-  type ClientToServerMessage,
+  stopListener,
+  stopListening,
+  write,
+  broadcast,
+  broadcastMessage,
+  broadcastProgress,
+  createResponseStream,
 } from '@/stream'
 import { compressAndEncodeMessage, decodeAndDecompressMessage } from '@/lib/compression'
-import { mockClientResponse, mockStream } from '@/tests/unit/utils'
+import type { ServerToClientMessage, ClientToServerMessage } from '@/types/stream'
 
-describe('Stream Library', () => {
-  let mockResponse: ReturnType<typeof mock>
+describe('Stream Module', () => {
+  let mockHandler: (message: ClientToServerMessage) => void
+  let receivedMessages: ClientToServerMessage[] = []
+  let unsubscribe: (() => void) | null = null
+  let stream: ReadableStream<Uint8Array>
+  let reader: ReadableStreamDefaultReader<Uint8Array>
+  let listenerId: string
 
   beforeEach(() => {
-    mockResponse = mock(() => {})
-    mockResponse.prototype = Response.prototype
+    receivedMessages = []
+    mockHandler = (message: ClientToServerMessage) => {
+      receivedMessages.push(message)
+    }
+
+    // Create response stream and start listening
+    stream = createResponseStream()
+    reader = stream.getReader()
+    listenerId = listen(reader)
+
+    // Register mock handler
+    const messageStream = (globalThis as any).messageStream
+    unsubscribe = messageStream.onInboundMessage(mockHandler)
   })
 
-  afterEach(() => {
-    mock.restore()
-  })
-
-  describe('createServerResponse', () => {
-    test('should create SSE response with proper headers', () => {
-      const messages = {
-        [Symbol.asyncIterator]: async function* () {
-          yield { type: 'chat', content: 'test', timestamp: Date.now() } as ServerToClientMessage
-        },
-      }
-
-      const response = createServerResponse(messages)
-      expect(response).toBeInstanceOf(Response)
-      expect(response.headers.get('Content-Type')).toBe('text/event-stream')
-      expect(response.headers.get('Cache-Control')).toBe('no-cache')
-      expect(response.headers.get('Connection')).toBe('keep-alive')
-    })
-
-    test('should stream compressed messages', async () => {
-      const testMessage: ServerToClientMessage = {
-        type: 'chat',
-        content: 'test',
-        timestamp: Date.now(),
-      }
-      const messages = {
-        [Symbol.asyncIterator]: async function* () {
-          yield testMessage
-        },
-      }
-
-      const response = createServerResponse(messages)
-      const reader = response.body!.getReader()
-      const { value } = await reader.read()
-      const text = new TextDecoder().decode(value)
-      expect(text).toStartWith('data: ~')
-      const decoded = decodeAndDecompressMessage(text.slice(6))
-      expect(decoded).toEqual(testMessage)
-    })
-
-    test('should handle stream errors', async () => {
-      const messages = {
-        [Symbol.asyncIterator]: async function* () {
-          throw new Error('test error')
-        },
-      }
-
-      const response = createServerResponse(messages)
-      const reader = response.body!.getReader()
-      const { done } = await reader.read()
-      expect(done).toBe(true)
-    })
+  afterEach(async () => {
+    if (unsubscribe) {
+      unsubscribe()
+      unsubscribe = null
+    }
+    await stopListener(listenerId)
+    await reader.cancel()
   })
 
   describe('listen', () => {
-    test('should decode client messages', async () => {
+    test('should support multiple concurrent listeners', async () => {
+      const messages1: ClientToServerMessage[] = []
+      const messages2: ClientToServerMessage[] = []
+
+      // Create two streams with separate handlers
+      const stream1 = createResponseStream()
+      const stream2 = createResponseStream()
+      const reader1 = stream1.getReader()
+      const reader2 = stream2.getReader()
+
+      const messageStream = (globalThis as any).messageStream
+      const unsubscribe1 = messageStream.onInboundMessage((msg: ClientToServerMessage) => {
+        messages1.push(msg)
+      })
+      const unsubscribe2 = messageStream.onInboundMessage((msg: ClientToServerMessage) => {
+        messages2.push(msg)
+      })
+
+      // Start both listeners
+      const id1 = listen(reader1)
+      const id2 = listen(reader2)
+
+      // Send test messages
       const testMessage: ClientToServerMessage = {
         type: 'input',
-        data: 'test',
+        data: 'test data',
         timestamp: Date.now(),
       }
+      const compressed = compressAndEncodeMessage(testMessage)
+      write(`data: ${compressed}\n\n`)
 
-      const stream = new ReadableStream({
-        start(controller) {
-          const compressed = compressAndEncodeMessage(testMessage)
-          controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
-          controller.close()
-        },
-      })
+      // Wait for message processing
+      await new Promise(resolve => setTimeout(resolve, 10))
 
-      const reader = stream.getReader()
-      const messages: ClientToServerMessage[] = []
-      for await (const message of listen(reader)) {
-        messages.push(message)
-      }
+      // Both handlers should receive the message
+      expect(messages1).toHaveLength(1)
+      expect(messages2).toHaveLength(1)
+      expect(messages1[0]).toEqual(testMessage)
+      expect(messages2[0]).toEqual(testMessage)
 
-      expect(messages).toHaveLength(1)
-      expect(messages[0]).toEqual(testMessage)
+      // Cleanup
+      unsubscribe1()
+      unsubscribe2()
+      await stopListener(id1)
+      await stopListener(id2)
+      await reader1.cancel()
+      await reader2.cancel()
     })
 
-    test('should handle stream errors', async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.error(new Error('test error'))
-        },
+    test('should handle stopping specific listeners', async () => {
+      const messages1: ClientToServerMessage[] = []
+      const messages2: ClientToServerMessage[] = []
+
+      // Create two streams with separate handlers
+      const stream1 = createResponseStream()
+      const stream2 = createResponseStream()
+      const reader1 = stream1.getReader()
+      const reader2 = stream2.getReader()
+
+      const messageStream = (globalThis as any).messageStream
+      const unsubscribe1 = messageStream.onInboundMessage((msg: ClientToServerMessage) => {
+        messages1.push(msg)
+      })
+      const unsubscribe2 = messageStream.onInboundMessage((msg: ClientToServerMessage) => {
+        messages2.push(msg)
       })
 
-      const reader = stream.getReader()
-      const messages: ClientToServerMessage[] = []
-      for await (const message of listen(reader)) {
-        messages.push(message)
-      }
+      // Start both listeners
+      const id1 = listen(reader1)
+      const id2 = listen(reader2)
 
-      expect(messages).toHaveLength(0)
+      // Stop first listener
+      await stopListener(id1)
+
+      // Send test message
+      const testMessage: ClientToServerMessage = {
+        type: 'input',
+        data: 'test data',
+        timestamp: Date.now(),
+      }
+      const compressed = compressAndEncodeMessage(testMessage)
+      write(`data: ${compressed}\n\n`)
+
+      // Wait for message processing
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      // Only second handler should receive the message
+      expect(messages1).toHaveLength(0)
+      expect(messages2).toHaveLength(1)
+      expect(messages2[0]).toEqual(testMessage)
+
+      // Cleanup
+      unsubscribe1()
+      unsubscribe2()
+      await stopListener(id2)
+      await reader1.cancel()
+      await reader2.cancel()
+    })
+
+    test('should decode and handle client messages', async () => {
+      const testMessage: ClientToServerMessage = {
+        type: 'input',
+        data: 'test data',
+        timestamp: Date.now(),
+      }
+      const compressed = compressAndEncodeMessage(testMessage)
+
+      // Send test message through stream
+      write(`data: ${compressed}\n\n`)
+
+      // Wait for message processing
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      expect(receivedMessages).toHaveLength(1)
+      expect(receivedMessages[0]).toEqual(testMessage)
     })
 
     test('should handle invalid messages', async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode('data: invalid\n\n'))
-          controller.close()
-        },
-      })
+      // Send invalid message
+      write('invalid message\n\n')
 
-      const reader = stream.getReader()
-      const messages: ClientToServerMessage[] = []
-      for await (const message of listen(reader)) {
-        messages.push(message)
+      // Wait for message processing
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      expect(receivedMessages).toHaveLength(0)
+    })
+
+    test('should handle stream errors', async () => {
+      // Force stream error by stopping while processing
+      write('data: invalid\n\n')
+      await stopListener(listenerId)
+
+      // Wait for error processing
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      expect(receivedMessages).toHaveLength(0)
+    })
+
+    test('should handle multiple messages', async () => {
+      const messages: ClientToServerMessage[] = [
+        {
+          type: 'input',
+          data: 'test1',
+          timestamp: Date.now(),
+        },
+        {
+          type: 'input',
+          data: 'test2',
+          timestamp: Date.now(),
+        },
+      ]
+
+      // Send multiple messages
+      for (const msg of messages) {
+        const compressed = compressAndEncodeMessage(msg)
+        write(`data: ${compressed}\n\n`)
       }
 
-      expect(messages).toHaveLength(0)
+      // Wait for message processing
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      expect(receivedMessages).toHaveLength(2)
+      expect(receivedMessages).toEqual(messages)
     })
   })
 
-  describe('StreamManager', () => {
-    test('should add and remove outbound message handlers', () => {
-      const manager = new StreamManager()
-      const handler = mock(() => {})
+  describe('broadcast', () => {
+    test('should compress and broadcast server messages', async () => {
+      let broadcastedMessage: string | undefined
 
-      manager.onOutboundMessage(handler)
-      manager.broadcast({ type: 'chat', content: 'test', timestamp: Date.now() })
-      expect(handler).toHaveBeenCalledTimes(1)
-
-      manager.offOutboundMessage(handler)
-      manager.broadcast({ type: 'chat', content: 'test', timestamp: Date.now() })
-      expect(handler).toHaveBeenCalledTimes(1)
-    })
-
-    test('should handle outbound handler errors', () => {
-      const manager = new StreamManager()
-      const handler = () => {
-        throw new Error('test error')
-      }
-
-      manager.onOutboundMessage(handler)
-      expect(() =>
-        manager.broadcast({ type: 'chat', content: 'test', timestamp: Date.now() })
-      ).not.toThrow()
-    })
-
-    test('should add and remove inbound message handlers', async () => {
-      const manager = new StreamManager()
-      const handler = mock(() => {})
-
-      manager.onInboundMessage(handler)
-      const testMessage: ClientToServerMessage = {
-        type: 'input',
-        data: 'test',
+      // Create test message
+      const testMessage: ServerToClientMessage = {
+        type: 'chat',
+        content: 'test content',
         timestamp: Date.now(),
       }
 
-      // Create a test stream
-      const stream = new ReadableStream({
-        start(controller) {
-          const compressed = compressAndEncodeMessage(testMessage)
-          controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
-          controller.close()
-        },
-      })
+      // Mock handler to capture broadcasted message
+      const mockHandler = (message: string) => {
+        broadcastedMessage = message
+      }
 
-      // Start reading from the stream
-      await manager.startInboundStream('test', stream.getReader())
-      expect(handler).toHaveBeenCalledTimes(1)
-      expect(handler).toHaveBeenCalledWith(testMessage)
+      // Register mock handler
+      const messageStream = (globalThis as any).messageStream
+      const unsubscribe = messageStream.onOutboundMessage(mockHandler)
 
-      manager.offInboundMessage(handler)
-      await manager.startInboundStream('test2', stream.getReader())
-      expect(handler).toHaveBeenCalledTimes(1)
-    })
+      // Broadcast message
+      broadcast(toAsyncIterable([testMessage]))
 
-    test('should handle inbound stream errors', async () => {
-      const manager = new StreamManager()
-      const handler = mock(() => {})
+      // Verify message was compressed and broadcasted
+      expect(broadcastedMessage).toBeDefined()
+      const decodedMessage = decodeAndDecompressMessage(broadcastedMessage!)
+      expect(decodedMessage).toEqual(testMessage)
 
-      manager.onInboundMessage(handler)
-
-      // Create a stream that errors
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.error(new Error('test error'))
-        },
-      })
-
-      await manager.startInboundStream('test', stream.getReader())
-      expect(handler).not.toHaveBeenCalled()
-    })
-
-    test('should stop streams properly', async () => {
-      const manager = new StreamManager()
-      const handler = mock(() => {})
-
-      manager.onInboundMessage(handler)
-
-      // Create test streams
-      const stream1 = new ReadableStream({
-        start(controller) {
-          const testMessage: ClientToServerMessage = {
-            type: 'input',
-            data: 'test1',
-            timestamp: Date.now(),
-          }
-          const compressed = compressAndEncodeMessage(testMessage)
-          controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
-        },
-      })
-
-      const stream2 = new ReadableStream({
-        start(controller) {
-          const testMessage: ClientToServerMessage = {
-            type: 'input',
-            data: 'test2',
-            timestamp: Date.now(),
-          }
-          const compressed = compressAndEncodeMessage(testMessage)
-          controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
-        },
-      })
-
-      // Start both streams
-      await manager.startInboundStream('stream1', stream1.getReader())
-      await manager.startInboundStream('stream2', stream2.getReader())
-
-      // Stop one stream
-      await manager.stopStream('stream1')
-      expect(handler).toHaveBeenCalledTimes(1)
-
-      // Stop all streams
-      await manager.stopAllStreams()
-      expect(handler).toHaveBeenCalledTimes(2)
+      // Cleanup
+      unsubscribe()
     })
   })
 
-  describe('streamManager singleton', () => {
-    test('should be exported and ready to use', () => {
-      expect(streamManager).toBeInstanceOf(StreamManager)
+  describe('broadcastMessage', () => {
+    test('should broadcast chat messages', async () => {
+      let broadcastedMessage: string | undefined
+
+      // Mock handler to capture broadcasted message
+      const mockHandler = (message: string) => {
+        broadcastedMessage = message
+      }
+
+      // Register mock handler
+      const messageStream = (globalThis as any).messageStream
+      const unsubscribe = messageStream.onOutboundMessage(mockHandler)
+
+      // Broadcast message
+      broadcastMessage('test message')
+
+      // Verify message was compressed and broadcasted
+      expect(broadcastedMessage).toBeDefined()
+      const decodedMessage = decodeAndDecompressMessage(broadcastedMessage!)
+      expect(decodedMessage).toHaveProperty('type', 'chat')
+      expect(decodedMessage).toHaveProperty('content', 'test message')
+
+      // Cleanup
+      unsubscribe()
+    })
+  })
+
+  describe('broadcastProgress', () => {
+    test('should broadcast progress updates', async () => {
+      let broadcastedMessage: string | undefined
+
+      // Mock handler to capture broadcasted message
+      const mockHandler = (message: string) => {
+        broadcastedMessage = message
+      }
+
+      // Register mock handler
+      const messageStream = (globalThis as any).messageStream
+      const unsubscribe = messageStream.onOutboundMessage(mockHandler)
+
+      // Broadcast progress
+      broadcastProgress('test progress')
+
+      // Verify message was compressed and broadcasted
+      expect(broadcastedMessage).toBeDefined()
+      const decodedMessage = decodeAndDecompressMessage(broadcastedMessage!)
+      expect(decodedMessage).toHaveProperty('type', 'progress')
+      expect(decodedMessage).toHaveProperty('content', 'test progress')
+
+      // Cleanup
+      unsubscribe()
     })
   })
 })
+
+// Helper function to convert array to async iterable
+function toAsyncIterable<T>(arr: T[]): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      yield* arr
+    },
+  }
+}
