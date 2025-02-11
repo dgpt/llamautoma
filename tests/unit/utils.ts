@@ -3,7 +3,7 @@ import { ChatOllama } from '@langchain/ollama'
 import { MemorySaver, entrypoint } from '@langchain/langgraph'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { compressAndEncodeMessage } from '@/lib/compression'
-import type { ServerMessage } from '@/stream'
+import type { ServerToClientMessage as ServerMessage } from '@/stream'
 
 // Constants
 export const TEST_TIMEOUT = 60000 // 60 seconds for real model responses
@@ -122,7 +122,10 @@ export const validateStreamChunks = <T extends { status: string; metadata?: Reco
 }
 
 // Helper to run tasks with test config
-export async function runWithTestConfig<T>(task: any, input: any): Promise<T> {
+export async function runWithTestConfig<T>(
+  task: { bind: (ctx: any) => (input: any) => Promise<T> },
+  input: any
+): Promise<T> {
   const ctx = createTestContext()
   const workflow = entrypoint(
     {
@@ -131,14 +134,23 @@ export async function runWithTestConfig<T>(task: any, input: any): Promise<T> {
     },
     async () => {
       const boundTask = task.bind({ config: testConfig })
-      return await boundTask({ messages: input })
+      const result = await boundTask(input)
+      return result
     }
   )
-  const result = await workflow.invoke(null, {
+  const result = await workflow.invoke(input, {
     configurable: {
       thread_id: ctx.threadId,
       checkpoint_ns: 'test',
     },
   })
-  return result as T
+  return result
+}
+
+// Helper to create a mock LLM response
+export function createMockLLM<T>(response: T) {
+  return {
+    invoke: async () => response,
+    lc_namespace: ['test'],
+  }
 }

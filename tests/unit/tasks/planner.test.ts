@@ -1,225 +1,192 @@
-import { expect, test, describe, beforeEach, spyOn } from 'bun:test'
-import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages'
-import { entrypoint } from '@langchain/langgraph'
-import { createTestContext, waitForResponse, TEST_TIMEOUT, type TestContext } from '../utils'
-import { plannerTask } from '@/ai/tasks/planner'
+import { expect, test, describe, spyOn } from 'bun:test'
+import { HumanMessage, SystemMessage } from '@langchain/core/messages'
+import { runWithTestConfig } from '../utils'
+import { plannerTask, ResponseType } from '@/ai/tasks/planner'
 import { PlannerTaskSchema, type PlannerTaskOutput } from '@/ai/tasks/schemas/tasks'
-import { llm } from '@/ai/llm'
+import * as llmModule from '@/ai/llm'
+import { DEFAULT_CONFIG } from '@/config'
+import { RunnableSequence } from '@langchain/core/runnables'
 
 describe('Planner Task Tests', () => {
-  let ctx: TestContext
-
-  beforeEach(() => {
-    ctx = createTestContext()
-  })
-
   test('should create plan for code request', async () => {
-    const workflow = entrypoint(
-      {
-        checkpointer: ctx.memorySaver,
-        name: 'planner_test',
-      },
-      async (messages: BaseMessage[]) => {
-        const result = await plannerTask({
-          messages,
-        })
-        return result
-      }
+    const mockResponse = {
+      explanation: 'Create a hello world function that prints a greeting',
+      steps: [
+        {
+          step: '1',
+          description: 'Create function definition',
+        },
+        {
+          step: '2',
+          description: 'Add print statement',
+        },
+      ],
+    }
+
+    const createLLMSpy = spyOn(llmModule, 'createStructuredLLM')
+    createLLMSpy.mockImplementation(
+      () =>
+        ({
+          invoke: async () => mockResponse,
+          lc_namespace: ['test'],
+        }) as unknown as RunnableSequence
     )
 
-    const messages = [
-      new SystemMessage('You are a code generation assistant.'),
-      new HumanMessage('Create a simple hello world function'),
-    ]
+    try {
+      const messages = [
+        new SystemMessage('You are a code generation assistant.'),
+        new HumanMessage('Create a simple hello world function'),
+      ]
 
-    const result = await Promise.race([
-      waitForResponse(
-        workflow.invoke(messages, {
-          configurable: {
-            thread_id: ctx.threadId,
-            checkpoint_ns: 'planner_test',
-          },
-        })
-      ),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Test timeout')), TEST_TIMEOUT * 2)
-      ),
-    ])
-    const plan = result as PlannerTaskOutput
+      const result = await runWithTestConfig<PlannerTaskOutput>(plannerTask, {
+        messages,
+        config: DEFAULT_CONFIG,
+      })
 
-    expect(() => PlannerTaskSchema.parse(plan)).not.toThrow()
-    expect(plan.response).toBeDefined()
-    expect(plan.plan).toBeDefined()
-    expect(plan.steps).toBeDefined()
-    if (plan.steps) {
-      expect(Array.isArray(plan.steps)).toBe(true)
-      expect(plan.steps.length).toBeGreaterThan(0)
-      expect(plan.steps[0]).toHaveProperty('step')
-      expect(plan.steps[0]).toHaveProperty('description')
-      expect(plan.steps[0]).toHaveProperty('status')
+      // Verify schema validation
+      expect(() => PlannerTaskSchema.parse(result)).not.toThrow()
+
+      // Verify required fields
+      expect(result.plan).toBe(mockResponse.explanation)
+      expect(typeof result.plan).toBe('string')
+      expect(result.plan.length).toBeGreaterThan(0)
+
+      // Verify steps
+      expect(result.steps).toBeDefined()
+      expect(Array.isArray(result.steps)).toBe(true)
+      expect(result.steps?.length).toBe(mockResponse.steps.length)
+
+      const firstStep = result.steps?.[0]
+      expect(firstStep).toBeDefined()
+      expect(firstStep?.step).toBe(mockResponse.steps[0].step)
+      expect(firstStep?.description).toBe(mockResponse.steps[0].description)
+      expect(firstStep?.status).toBe('pending')
+
+      // Verify response
+      expect(result.response).toBeDefined()
+      expect(result.response.type).toBe(ResponseType.Plan)
+      expect(result.response.content).toBe(mockResponse.explanation)
+      expect(result.response.shouldDisplay).toBe(true)
+      expect(result.response.timestamp).toBeDefined()
+
+      // Verify stream responses
+      expect(result.streamResponses).toBeDefined()
+      expect(Array.isArray(result.streamResponses)).toBe(true)
+      expect(result.streamResponses.length).toBe(4) // Start + 2 steps + End
+
+      // Verify progress messages
+      const startProgress = result.streamResponses.find(
+        r => r.type === ResponseType.Progress && r.content === 'Creating plan...'
+      )
+      expect(startProgress).toBeDefined()
+
+      const endProgress = result.streamResponses.find(
+        r => r.type === ResponseType.Progress && r.content === 'Plan created successfully'
+      )
+      expect(endProgress).toBeDefined()
+
+      // Verify step messages
+      const stepMessages = result.streamResponses.filter(r => r.type === ResponseType.Plan)
+      expect(stepMessages.length).toBe(result.steps!.length)
+      expect(stepMessages[0].content).toBe(
+        `Step ${mockResponse.steps[0].step}: ${mockResponse.steps[0].description}`
+      )
+      expect(stepMessages[1].content).toBe(
+        `Step ${mockResponse.steps[1].step}: ${mockResponse.steps[1].description}`
+      )
+    } finally {
+      createLLMSpy.mockRestore()
     }
   })
 
-  test('should stream progress and plan steps', async () => {
-    const workflow = entrypoint(
-      {
-        checkpointer: ctx.memorySaver,
-        name: 'planner_test',
-      },
-      async (messages: BaseMessage[]) => {
-        const result = await plannerTask({
-          messages,
-        })
-        return result
-      }
-    )
-
-    const messages = [
-      new SystemMessage('You are a code generation assistant.'),
-      new HumanMessage('Create a simple hello world function'),
-    ]
-
-    const result = await Promise.race([
-      waitForResponse(
-        workflow.invoke(messages, {
-          configurable: {
-            thread_id: ctx.threadId,
-            checkpoint_ns: 'planner_test',
-          },
-        })
-      ),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Test timeout')), TEST_TIMEOUT * 2)
-      ),
-    ])
-    const plan = result as PlannerTaskOutput
-
-    // Verify streaming responses
-    expect(plan.streamResponses).toBeDefined()
-    expect(plan.streamResponses.length).toBeGreaterThan(0)
-
-    // Verify initial progress message
-    const progressStart = plan.streamResponses.find(
-      r => r.type === 'progress' && r.content === 'Creating plan...'
-    )
-    expect(progressStart).toBeDefined()
-
-    // Verify plan steps are streamed
-    const planSteps = plan.streamResponses.filter(r => r.type === 'plan')
-    expect(planSteps.length).toBeGreaterThan(0)
-
-    // Verify completion message
-    const progressEnd = plan.streamResponses.find(
-      r => r.type === 'progress' && r.content === 'Plan created successfully'
-    )
-    expect(progressEnd).toBeDefined()
-  }, 42000)
-
   test('should handle empty message input', async () => {
-    const workflow = entrypoint(
-      {
-        checkpointer: ctx.memorySaver,
-        name: 'planner_test',
-      },
-      async () => {
-        throw new Error('No messages provided to planner task')
-      }
-    )
-
     await expect(
-      workflow.invoke([], {
-        configurable: {
-          thread_id: ctx.threadId,
-          checkpoint_ns: 'planner_test',
-        },
+      runWithTestConfig<PlannerTaskOutput>(plannerTask, {
+        messages: [],
+        config: DEFAULT_CONFIG,
       })
     ).rejects.toThrow('No messages provided to planner task')
   })
 
-  test('should handle LLM errors gracefully', async () => {
-    const llmSpy = spyOn(llm, 'invoke')
-    llmSpy.mockImplementation(() => Promise.reject(new Error('LLM error')))
+  test('should handle LLM errors', async () => {
+    const createLLMSpy = spyOn(llmModule, 'createStructuredLLM')
+    createLLMSpy.mockImplementation(() => {
+      throw new Error('LLM error')
+    })
 
-    const workflow = entrypoint(
-      {
-        checkpointer: ctx.memorySaver,
-        name: 'planner_test',
-      },
-      async (messages: BaseMessage[]) => {
-        const result = await plannerTask({
+    try {
+      await expect(
+        runWithTestConfig<PlannerTaskOutput>(plannerTask, {
           messages: [new HumanMessage('test')],
+          config: DEFAULT_CONFIG,
         })
-        return result
-      }
-    )
-
-    await expect(
-      Promise.race([
-        workflow.invoke([new HumanMessage('test')], {
-          configurable: {
-            thread_id: ctx.threadId,
-            checkpoint_ns: 'planner_test',
-          },
-        }),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Test timeout')), TEST_TIMEOUT)
-        ),
-      ])
-    ).rejects.toThrow('LLM error')
-
-    llmSpy.mockRestore()
+      ).rejects.toThrow('LLM error')
+    } finally {
+      createLLMSpy.mockRestore()
+    }
   })
 
-  test('should validate response structure', async () => {
-    const workflow = entrypoint(
-      {
-        checkpointer: ctx.memorySaver,
-        name: 'planner_test',
-      },
-      async (messages: BaseMessage[]) => {
-        const result = await plannerTask({
-          messages,
-        })
-        return result
-      }
+  test('should use default config when none provided', async () => {
+    const mockResponse = {
+      explanation: 'Test plan with default config',
+      steps: [
+        {
+          step: '1',
+          description: 'Test step',
+        },
+      ],
+    }
+
+    const createLLMSpy = spyOn(llmModule, 'createStructuredLLM')
+    createLLMSpy.mockImplementation(
+      () =>
+        ({
+          invoke: async () => mockResponse,
+          lc_namespace: ['test'],
+        }) as unknown as RunnableSequence
     )
 
-    const messages = [
-      new SystemMessage('You are a code generation assistant.'),
-      new HumanMessage('Create a simple hello world function'),
-    ]
+    try {
+      const messages = [
+        new SystemMessage('You are a code generation assistant.'),
+        new HumanMessage('Create a simple hello world function'),
+      ]
 
-    const result = await Promise.race([
-      waitForResponse(
-        workflow.invoke(messages, {
-          configurable: {
-            thread_id: ctx.threadId,
-            checkpoint_ns: 'planner_test',
-          },
-        })
-      ),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Test timeout')), TEST_TIMEOUT * 2)
-      ),
-    ])
-    const plan = result as PlannerTaskOutput
-
-    // Verify response structure
-    expect(plan.response.type).toBe('plan')
-    expect(plan.response.shouldDisplay).toBe(true)
-    expect(plan.response.priority).toBeGreaterThan(0)
-    expect(plan.response.priority).toBeLessThanOrEqual(100)
-    expect(plan.response.timestamp).toBeDefined()
-    expect(typeof plan.response.content).toBe('string')
-
-    // Verify steps structure
-    expect(plan.steps).toBeDefined()
-    if (plan.steps) {
-      plan.steps.forEach(step => {
-        expect(step.status).toBe('pending')
-        expect(typeof step.step).toBe('string')
-        expect(typeof step.description).toBe('string')
+      const result = await runWithTestConfig<PlannerTaskOutput>(plannerTask, {
+        messages,
       })
+
+      expect(() => PlannerTaskSchema.parse(result)).not.toThrow()
+      expect(result.plan).toBe(mockResponse.explanation)
+    } finally {
+      createLLMSpy.mockRestore()
+    }
+  })
+
+  test('should handle schema validation errors', async () => {
+    const mockInvalidResponse = {
+      explanation: 123, // Should be string
+      steps: [{ step: 1 }], // Missing required fields
+    }
+
+    const createLLMSpy = spyOn(llmModule, 'createStructuredLLM')
+    createLLMSpy.mockImplementation(
+      () =>
+        ({
+          invoke: async () => mockInvalidResponse,
+          lc_namespace: ['test'],
+        }) as unknown as RunnableSequence
+    )
+
+    try {
+      await expect(
+        runWithTestConfig<PlannerTaskOutput>(plannerTask, {
+          messages: [new HumanMessage('test')],
+          config: DEFAULT_CONFIG,
+        })
+      ).rejects.toThrow()
+    } finally {
+      createLLMSpy.mockRestore()
     }
   })
 })

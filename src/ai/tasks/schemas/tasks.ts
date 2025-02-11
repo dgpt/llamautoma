@@ -6,22 +6,21 @@ import { FileSchema } from '../../tools/schemas/file'
  */
 export const TaskResponseContentSchema = z.object({
   content: z.string().describe('The actual content/message to be displayed in the chat window'),
-  type: z.enum(['info', 'warning', 'error', 'success', 'code', 'plan', 'review', 'progress'])
+  type: z
+    .enum(['info', 'warning', 'error', 'success', 'code', 'plan', 'review', 'progress'])
     .describe('The type of response, used for styling and handling in the client'),
-  shouldDisplay: z.boolean()
+  shouldDisplay: z
+    .boolean()
     .describe('Whether this response should be displayed in the chat window')
     .default(true),
-  metadata: z.record(z.any())
+  metadata: z
+    .record(z.any())
     .optional()
     .describe('Additional metadata about the response that may be used by the client'),
-  timestamp: z.number()
+  timestamp: z
+    .number()
     .default(() => Date.now())
     .describe('Timestamp when the response was generated'),
-  priority: z.number()
-    .min(0)
-    .max(100)
-    .default(50)
-    .describe('Priority of the message for display ordering (0-100, higher = more important)'),
 })
 
 /**
@@ -62,7 +61,6 @@ export const ReviewerTaskSchema = BaseTaskSchema.extend({
       z.object({
         step: z.string(),
         action: z.string(),
-        priority: z.enum(['high', 'medium', 'low']).default('medium'),
       })
     )
     .optional(),

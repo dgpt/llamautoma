@@ -1,112 +1,123 @@
 import { task } from '@langchain/langgraph'
-import { BaseMessage } from '@langchain/core/messages'
+import { BaseMessage, SystemMessage } from '@langchain/core/messages'
 import { RunnableConfig } from '@langchain/core/runnables'
-import { PlannerTaskSchema } from './schemas/tasks'
-import { llm } from '../llm'
-import { getMessageString } from './lib'
+import { PlannerTaskSchema, type PlannerTaskOutput } from './schemas/tasks'
+import { createStructuredLLM } from '../llm'
+import { TaskType } from '@/types'
+import type { Config } from '@/types'
+import { DEFAULT_CONFIG } from '@/config'
+import { z } from 'zod'
+
+// Define response types as enum for better type safety
+export enum ResponseType {
+  Info = 'info',
+  Warning = 'warning',
+  Error = 'error',
+  Success = 'success',
+  Code = 'code',
+  Plan = 'plan',
+  Review = 'review',
+  Progress = 'progress',
+}
+
+// Schema for LLM response
+const LLMResponseSchema = z.object({
+  explanation: z.string(),
+  steps: z.array(
+    z.object({
+      step: z.string(),
+      description: z.string(),
+    })
+  ),
+})
+
+type LLMResponse = z.infer<typeof LLMResponseSchema>
 
 /**
  * Creates a plan for code generation based on user request
  */
 export const plannerTask = task(
   'planner',
-  async (input: { messages: BaseMessage[] }, config?: RunnableConfig) => {
+  async (
+    input: { messages: BaseMessage[]; config?: Config },
+    runConfig?: RunnableConfig
+  ): Promise<PlannerTaskOutput> => {
     // Validate input
-    if (!input.messages || input.messages.length === 0) {
+    if (!input.messages?.length) {
       throw new Error('No messages provided to planner task')
     }
 
-    // Stream initial progress
-    const streamResponses = []
-    streamResponses.push({
-      type: 'progress',
-      content: 'Creating plan...',
-      timestamp: Date.now(),
-      shouldDisplay: true,
-      priority: 50,
-    })
+    // Add planning instructions
+    const messages = [
+      ...input.messages,
+      new SystemMessage({
+        content: `Create a detailed plan for implementing the user's request.
+The response MUST be valid JSON with this structure:
 
-    try {
-      // Convert messages to string for context
-      const context = input.messages.map(getMessageString).join('\n')
-
-      // Generate plan using LLM
-      const response = await llm.invoke(
-        `Based on the following conversation, create a plan for implementing the user's request:
-
-        ${context}
-
-        Respond with:
-        1. A clear explanation of what needs to be done
-        2. Step by step plan for implementation
-        3. Any potential challenges or considerations
-
-        Keep the response concise but informative.`
-      )
-
-      // Parse response into sections
-      const content =
-        typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
-      const [explanation, ...planSteps] = content.split('\n\n')
-
-      // Stream explanation to chat
-      streamResponses.push({
-        type: 'plan',
-        content: explanation,
-        timestamp: Date.now(),
-        shouldDisplay: true,
-        priority: 80,
-      })
-
-      // Stream each plan step
-      planSteps.forEach((step, index) => {
-        streamResponses.push({
-          type: 'plan',
-          content: `Step ${index + 1}: ${step}`,
-          timestamp: Date.now(),
-          shouldDisplay: true,
-          priority: 70,
-        })
-      })
-
-      // Stream completion status before creating result
-      streamResponses.push({
-        type: 'progress',
-        content: 'Plan created successfully',
-        timestamp: Date.now(),
-        shouldDisplay: true,
-        priority: 50,
-      })
-
-      // Create final response
-      const result = PlannerTaskSchema.parse({
-        plan: planSteps.join('\n\n'),
-        response: {
-          type: 'plan',
-          content: explanation,
-          timestamp: Date.now(),
-          shouldDisplay: true,
-          priority: 100,
-        },
-        streamResponses,
-        steps: planSteps.map((step, index) => ({
-          step: `${index + 1}`,
-          description: step,
-          status: 'pending',
-        })),
-      })
-
-      return result
-    } catch (error) {
-      // Stream error status
-      streamResponses.push({
-        type: 'error',
-        content: `Failed to create plan: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: Date.now(),
-        shouldDisplay: true,
-        priority: 100,
-      })
-      throw error
+{
+  "explanation": "Detailed explanation of what needs to be done",
+  "steps": [
+    {
+      "step": "1",
+      "description": "Detailed step description"
     }
+  ]
+}
+
+Guidelines:
+1. The explanation should be clear and actionable
+2. Break down complex tasks into smaller steps
+3. Consider potential challenges and edge cases
+4. Include any necessary setup or prerequisites`,
+      }),
+    ]
+
+    // Create structured LLM for planning
+    const llm = createStructuredLLM<LLMResponse>(
+      LLMResponseSchema,
+      TaskType.Plan,
+      input.config || DEFAULT_CONFIG
+    )
+
+    // Generate plan using structured LLM
+    const result = await llm.invoke(messages, runConfig)
+
+    // Format result into PlannerTaskOutput
+    const output: PlannerTaskOutput = {
+      plan: result.explanation,
+      steps: result.steps.map((step: { step: string; description: string }) => ({
+        ...step,
+        status: 'pending',
+      })),
+      response: {
+        type: ResponseType.Plan,
+        content: result.explanation,
+        shouldDisplay: true,
+        timestamp: Date.now(),
+      },
+      streamResponses: [
+        {
+          type: ResponseType.Progress,
+          content: 'Creating plan...',
+          shouldDisplay: true,
+          timestamp: Date.now(),
+        },
+        ...result.steps.map((step: { step: string; description: string }) => ({
+          type: ResponseType.Plan,
+          content: `Step ${step.step}: ${step.description}`,
+          shouldDisplay: true,
+          timestamp: Date.now(),
+        })),
+        {
+          type: ResponseType.Progress,
+          content: 'Plan created successfully',
+          shouldDisplay: true,
+          timestamp: Date.now(),
+        },
+      ],
+    }
+
+    // Validate output matches schema
+    return PlannerTaskSchema.parse(output)
   }
 )

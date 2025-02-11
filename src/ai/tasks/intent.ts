@@ -20,8 +20,6 @@ const IntentSchema = z.object({
 
 export type Intent = z.infer<typeof IntentSchema>
 
-const intent = createStructuredLLM<Intent>(IntentSchema, TaskType.Intent)
-
 /**
  * Determines the intent of the user's query
  * @param messages The conversation history
@@ -101,6 +99,7 @@ Remember: Your output should include only the JSON object and nothing else.
 `
 
     try {
+      const intent = createStructuredLLM(IntentSchema, TaskType.Intent, config?.config)
       const result = await intent.invoke([...input.messages, new SystemMessage(prompt)], config)
       logger.debug(result)
       return result

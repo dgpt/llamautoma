@@ -1,10 +1,10 @@
-import { llm } from '../llm'
-import { getMessageString } from '../tasks/lib'
-import { broadcast } from '../../stream'
+import { createLLM } from '@/ai/llm'
+import { TaskType } from '@/types'
+import { getMessageString } from '@/ai/tasks/lib'
+import { broadcast } from '@/stream'
 import { BaseMessage, HumanMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
-import { ReviewerTaskSchema } from './schemas/tasks'
-import { z } from 'zod'
+import { ReviewerTaskSchema } from '@/ai/tasks/schemas/tasks'
 import type { RunnableConfig as LlamautomaConfig } from '@/types'
 
 /**
@@ -17,10 +17,32 @@ export const reviewerTask = task(
       messages: BaseMessage[]
       files: Record<string, string>
     },
-    config?: LlamautomaConfig
+    config: LlamautomaConfig
   ) => {
     // Update initial progress
     broadcast('Reviewing code...', 'progress')
+
+    // Handle empty files object
+    if (!input.files || Object.keys(input.files).length === 0) {
+      const response = {
+        content: 'No files provided for review.',
+        type: 'review' as const,
+        shouldDisplay: true,
+        timestamp: Date.now(),
+      }
+
+      return ReviewerTaskSchema.parse({
+        approved: false,
+        feedback: 'No files provided for review.',
+        suggestions: [],
+        metrics: {
+          quality: 0,
+          coverage: 0,
+          complexity: 0,
+        },
+        response,
+      })
+    }
 
     // Convert messages to string for context
     const context = input.messages.map(getMessageString).join('\n')
@@ -35,22 +57,37 @@ export const reviewerTask = task(
         .map(([path, content]) => `FILE: ${path}\n\`\`\`\n${content}\n\`\`\``)
         .join('\n\n')}
 
-      Review the code above and provide feedback. Consider:
+      Review the code above and provide feedback. For each file, consider:
       1. Code quality and readability
       2. Error handling and edge cases
       3. Performance and efficiency
       4. Security considerations
       5. Testing and maintainability
+      6. For CSS files:
+         - Style organization and naming
+         - Responsive design
+         - Browser compatibility
+         - Performance optimizations
 
-      Respond with:
+      Your response MUST include:
       1. Overall assessment (approved/rejected)
-      2. Detailed feedback
-      3. Specific suggestions for improvement
+      2. Detailed feedback for EACH file, including:
+         - For TypeScript/JavaScript: Code structure, patterns, and practices
+         - For CSS: Style organization, naming conventions, and responsive design
+      3. Specific suggestions for improvement, formatted as follows:
+         Category: Action to take
+         Example: Security: Add input validation
     `
 
-    const response = await llm.invoke([new HumanMessage(prompt)])
+    const response = await createLLM(TaskType.Review, config.config).invoke([
+      new HumanMessage(prompt),
+    ])
     const responseContent =
-      typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
+      typeof response.content === 'string'
+        ? response.content
+        : typeof response.content === 'object' && 'text' in response.content
+          ? String(response.content.text)
+          : JSON.stringify(response.content)
 
     // Parse response into review format
     const approved = responseContent.toLowerCase().includes('approved')
@@ -73,7 +110,6 @@ export const reviewerTask = task(
         content: responseContent,
         type: 'review',
         shouldDisplay: true,
-        priority: 75,
         timestamp: Date.now(),
       },
     })
@@ -83,61 +119,26 @@ export const reviewerTask = task(
 function extractSuggestions(feedback: string): Array<{
   step: string
   action: string
-  priority: 'high' | 'medium' | 'low'
 }> {
-  const suggestions: Array<{ step: string; action: string; priority: 'high' | 'medium' | 'low' }> =
-    []
+  // Handle empty or whitespace-only feedback
+  if (!feedback || !feedback.trim()) {
+    return []
+  }
+
+  const suggestions: Array<{ step: string; action: string }> = []
   const lines = feedback.split('\n')
 
   for (const line of lines) {
-    const match = line.match(/^(\d+\.\s*|\-\s*)(.*?):\s*(.*)$/)
+    // Match suggestions in format "Category: Action"
+    const match = line.match(/^([^:]+):\s*(.+)$/i)
     if (match) {
-      // Determine priority based on keywords in the action
-      const action = match[3].trim()
-      let priority: 'high' | 'medium' | 'low' = 'medium'
-
-      // Check for high priority keywords
-      if (/\b(critical|urgent|security|crash|error|bug|must|required|essential)\b/i.test(action)) {
-        priority = 'high'
-      }
-      // Check for low priority keywords
-      else if (
-        /\b(minor|cosmetic|optional|nice to have|consider|might|could|style)\b/i.test(action)
-      ) {
-        priority = 'low'
-      }
-
+      const [, step, action] = match
       suggestions.push({
-        step: match[2].trim(),
-        action: action,
-        priority: priority,
+        step: step.trim(),
+        action: action.trim(),
       })
     }
   }
 
   return suggestions
 }
-
-// Schema for reviewer output
-const ReviewerOutputSchema = z.object({
-  approved: z.boolean().describe('Whether the code or plan meets requirements'),
-  feedback: z.string().describe('Detailed feedback about the code or plan'),
-  suggestions: z
-    .array(
-      z.object({
-        step: z.string().describe('The area or component to improve'),
-        action: z.string().describe('What needs to be done'),
-        priority: z.enum(['high', 'medium', 'low']).describe('Priority of the suggestion'),
-      })
-    )
-    .describe('Specific suggestions for improvement')
-    .optional(),
-  metrics: z
-    .object({
-      quality: z.number().min(0).max(100).describe('Overall code quality score'),
-      coverage: z.number().min(0).max(100).describe('Test coverage score'),
-      complexity: z.number().min(0).max(100).describe('Code complexity score'),
-    })
-    .describe('Quantitative metrics about the code')
-    .optional(),
-})

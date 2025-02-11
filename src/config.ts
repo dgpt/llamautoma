@@ -39,11 +39,11 @@ export const DEFAULT_CONFIG = {
   name: 'llamautoma',
   description: 'AI agent for code generation and management',
   models: {
-    coder: 'qwen2.5-coder:32b',
-    intent: 'llama3.2',
-    planner: 'llama3.2',
-    reviewer: 'qwen2.5-coder:32b',
-    summarizer: 'llama3.2',
+    coder: 'qwen2.5-coder:7b',
+    intent: 'qwen2.5-coder:7b',
+    planner: 'qwen2.5-coder:7b',
+    reviewer: 'qwen2.5-coder:7b',
+    summarizer: 'qwen2.5-coder:7b',
   },
   server: {
     host: 'http://localhost:11434',
@@ -56,10 +56,10 @@ export const DEFAULT_CONFIG = {
 export const TEST_CONFIG = {
   ...DEFAULT_CONFIG,
   models: {
-    coder: 'qwen2.5-coder:7b',
+    coder: 'qwen2.5-coder:1.5b',
     intent: 'qwen2.5-coder:1.5b',
     planner: 'qwen2.5-coder:1.5b',
-    reviewer: 'qwen2.5-coder:7b',
+    reviewer: 'qwen2.5-coder:1.5b',
     summarizer: 'qwen2.5-coder:1.5b',
   },
 }

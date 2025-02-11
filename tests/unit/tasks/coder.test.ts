@@ -153,7 +153,6 @@ describe('Coder Task Tests', () => {
                 content: 'Add proper error handling and logging',
                 shouldDisplay: true,
                 timestamp: Date.now(),
-                priority: 80,
               },
               streamResponses: [],
               approved: false,
@@ -162,12 +161,10 @@ describe('Coder Task Tests', () => {
                 {
                   step: 'Add router setup',
                   action: 'Include error middleware and panic recovery',
-                  priority: 'high',
                 },
                 {
                   step: 'Add logging middleware',
                   action: 'Use structured logging with proper levels and request tracing',
-                  priority: 'medium',
                 },
               ],
             } as ReviewerTaskOutput,
