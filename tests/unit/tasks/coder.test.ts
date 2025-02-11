@@ -3,8 +3,16 @@ import { HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messag
 import { entrypoint } from '@langchain/langgraph'
 import { createTestContext, waitForResponse, TEST_TIMEOUT, type TestContext } from '../utils'
 import { coderTask } from '@/ai/tasks/coder'
-import { GeneratedCodeSchema, type GeneratedCode } from 'llamautoma-types'
-import type { Plan } from '@/ai/types'
+import {
+  CoderTaskSchema,
+  type CoderTaskOutput,
+  type ReviewerTaskOutput,
+} from '@/ai/tasks/schemas/tasks'
+
+interface Plan {
+  response: string
+  steps: string[]
+}
 
 describe('Coder Task Tests', () => {
   let ctx: TestContext
@@ -22,7 +30,7 @@ describe('Coder Task Tests', () => {
           name: 'coder_test',
         },
         async (messages: BaseMessage[]) => {
-          const plan: Plan = {
+          const plan = {
             response: 'Create a FastAPI endpoint for user registration',
             steps: [
               'Create FastAPI app',
@@ -34,7 +42,7 @@ describe('Coder Task Tests', () => {
           }
           const result = await coderTask({
             messages,
-            plan,
+            plan: plan.steps.join('\n'),
           })
           return result
         }
@@ -53,11 +61,13 @@ describe('Coder Task Tests', () => {
           },
         })
       )
-      const generated = result as GeneratedCode
+      const generated = result as CoderTaskOutput
 
-      expect(() => GeneratedCodeSchema.parse(generated)).not.toThrow()
+      expect(() => CoderTaskSchema.parse(generated)).not.toThrow()
       expect(generated.files).toBeDefined()
-      expect(generated.files?.length).toBeGreaterThan(0)
+      expect(generated.files.length).toBeGreaterThan(0)
+      expect(generated.response).toBeDefined()
+      expect(generated.streamResponses).toBeDefined()
     },
     TEST_TIMEOUT
   )
@@ -71,7 +81,7 @@ describe('Coder Task Tests', () => {
           name: 'coder_test',
         },
         async (messages: BaseMessage[]) => {
-          const plan: Plan = {
+          const plan = {
             response: 'Create a React counter component',
             steps: [
               'Create component file',
@@ -83,7 +93,7 @@ describe('Coder Task Tests', () => {
           }
           const result = await coderTask({
             messages,
-            plan,
+            plan: plan.steps.join('\n'),
           })
           return result
         }
@@ -102,13 +112,15 @@ describe('Coder Task Tests', () => {
           },
         })
       )
-      const generated = result as GeneratedCode
+      const generated = result as CoderTaskOutput
 
-      expect(() => GeneratedCodeSchema.parse(generated)).not.toThrow()
+      expect(() => CoderTaskSchema.parse(generated)).not.toThrow()
       expect(generated.dependencies).toBeDefined()
       expect(generated.dependencies?.length).toBeGreaterThan(0)
       expect(generated.files).toBeDefined()
-      expect(generated.files?.length).toBeGreaterThan(0)
+      expect(generated.files.length).toBeGreaterThan(0)
+      expect(generated.response).toBeDefined()
+      expect(generated.streamResponses).toBeDefined()
     },
     TEST_TIMEOUT
   )
@@ -122,7 +134,7 @@ describe('Coder Task Tests', () => {
           name: 'coder_test',
         },
         async (messages: BaseMessage[]) => {
-          const plan: Plan = {
+          const plan = {
             response: 'Create a Go HTTP server',
             steps: [
               'Create main package',
@@ -134,8 +146,16 @@ describe('Coder Task Tests', () => {
           }
           const result = await coderTask({
             messages,
-            plan,
+            plan: plan.steps.join('\n'),
             review: {
+              response: {
+                type: 'review',
+                content: 'Add proper error handling and logging',
+                shouldDisplay: true,
+                timestamp: Date.now(),
+                priority: 80,
+              },
+              streamResponses: [],
               approved: false,
               feedback: 'Add proper error handling and logging',
               suggestions: [
@@ -150,7 +170,7 @@ describe('Coder Task Tests', () => {
                   priority: 'medium',
                 },
               ],
-            },
+            } as ReviewerTaskOutput,
           })
           return result
         }
@@ -169,11 +189,13 @@ describe('Coder Task Tests', () => {
           },
         })
       )
-      const generated = result as GeneratedCode
+      const generated = result as CoderTaskOutput
 
-      expect(() => GeneratedCodeSchema.parse(generated)).not.toThrow()
+      expect(() => CoderTaskSchema.parse(generated)).not.toThrow()
       expect(generated.files).toBeDefined()
-      expect(generated.files?.length).toBeGreaterThan(0)
+      expect(generated.files.length).toBeGreaterThan(0)
+      expect(generated.response).toBeDefined()
+      expect(generated.streamResponses).toBeDefined()
     },
     TEST_TIMEOUT
   )

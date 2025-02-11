@@ -1,83 +1,96 @@
 import { logger } from '@/logger'
-import { createStreamResponse, readClientStream } from '@/stream'
-import type { StreamMessage } from '@/stream'
-import { DEFAULT_AGENT_CONFIG } from '@/types'
+import { broadcast, onInboundMessage } from '@/stream'
+import type { ServerToClientMessage, ClientToServerMessage } from '@/stream'
+import { DEFAULT_CONFIG } from '@/config'
+import { decompressAndDecodeFile } from '@/lib/compression'
 
 /**
  * Get file content from client
  * Returns compressed and encoded file content
  */
-export async function getFile(path: string, config = DEFAULT_AGENT_CONFIG): Promise<string> {
-  try {
-    // Create request message
-    const request: StreamMessage = {
-      type: 'edit',
-      data: {
-        path,
-        action: 'read',
-      },
+export async function getFile(path: string, config = DEFAULT_CONFIG): Promise<string> {
+  const request: ServerToClientMessage = {
+    type: 'edit',
+    data: {
+      path,
+      action: 'read',
+    },
+    timestamp: Date.now(),
+  }
+
+  return new Promise((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    let unsubscribe: (() => void) | null = null
+    let isHandled = false
+
+    const setupTimeout = () => {
+      timeoutId = setTimeout(() => {
+        if (!isHandled) {
+          isHandled = true
+          if (unsubscribe) unsubscribe()
+          reject(new Error('File request timeout'))
+        }
+      }, config.timeout)
     }
 
-    // Create response stream
-    const response = createStreamResponse({
-      async *[Symbol.asyncIterator]() {
-        yield request
-      },
+    unsubscribe = onInboundMessage(async (message: ClientToServerMessage) => {
+      if (message.type !== 'input' || isHandled) return
+
+      const response = message.data
+      if (typeof response !== 'object' || response === null) {
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error('Invalid response format'))
+        return
+      }
+
+      const { content, error } = response as {
+        content?: string
+        error?: string
+      }
+
+      if (error) {
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error(error))
+        return
+      }
+
+      if (content) {
+        try {
+          const decompressedContent = await decompressAndDecodeFile(content)
+          isHandled = true
+          if (timeoutId) clearTimeout(timeoutId)
+          if (unsubscribe) unsubscribe()
+          resolve(decompressedContent)
+          return
+        } catch (error) {
+          isHandled = true
+          if (timeoutId) clearTimeout(timeoutId)
+          if (unsubscribe) unsubscribe()
+          reject(new Error('Invalid response format'))
+          return
+        }
+      }
+
+      isHandled = true
+      if (timeoutId) clearTimeout(timeoutId)
+      if (unsubscribe) unsubscribe()
+      reject(new Error('Response missing both content and error'))
     })
-    const reader = response.body?.getReader()
-    if (!reader) throw new Error('Failed to create stream reader')
 
-    // Create response promise
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reader.releaseLock()
-        reject(new Error('File request timeout'))
-      }, config.userInputTimeout)
-
-      // Read response stream
-      readClientStream(reader)
-        .next()
-        .then(({ value, done }) => {
-          clearTimeout(timeout)
-          if (done) {
-            reject(new Error('Stream ended without response'))
-            return
-          }
-
-          if (value?.type === 'edit' && typeof value.data === 'object' && value.data !== null) {
-            const { content, error } = value.data as {
-              content?: string
-              error?: string
-            }
-
-            if (error) {
-              logger.error(`Error reading file ${path}: ${error}`)
-              reject(new Error(error))
-              return
-            }
-
-            if (content) {
-              resolve(content)
-              return
-            }
-
-            reject(new Error('Response missing both content and error'))
-            return
-          }
-
-          reject(new Error('Invalid response type'))
-        })
-        .catch(error => {
-          clearTimeout(timeout)
-          logger.error(`Failed to process file response: ${error}`)
-          reject(error)
-        })
+    setupTimeout()
+    broadcast(request).catch(error => {
+      if (!isHandled) {
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error(`Failed to read file: ${error.message}`))
+      }
     })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    logger.error(`File operation error: ${message}`)
-    throw new Error(`Failed to read file: ${message}`)
-  }
+  })
 }
 
 /**
@@ -86,80 +99,110 @@ export async function getFile(path: string, config = DEFAULT_AGENT_CONFIG): Prom
  */
 export async function getDirectory(
   path: string,
-  config = DEFAULT_AGENT_CONFIG,
+  config = DEFAULT_CONFIG,
   includePattern?: string,
   excludePattern?: string
 ): Promise<Record<string, string>> {
-  try {
-    // Create request message
-    const request: StreamMessage = {
-      type: 'edit',
-      data: {
-        path,
-        action: 'readdir',
-        includePattern,
-        excludePattern,
-      },
+  const request: ServerToClientMessage = {
+    type: 'edit',
+    data: {
+      path,
+      action: 'readdir',
+      includePattern,
+      excludePattern,
+    },
+    timestamp: Date.now(),
+  }
+
+  return new Promise((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    let unsubscribe: (() => void) | null = null
+    let isHandled = false
+
+    const setupTimeout = () => {
+      timeoutId = setTimeout(() => {
+        if (!isHandled) {
+          isHandled = true
+          if (unsubscribe) unsubscribe()
+          reject(new Error('Directory request timeout'))
+        }
+      }, config.timeout)
     }
 
-    // Create response stream
-    const response = createStreamResponse({
-      async *[Symbol.asyncIterator]() {
-        yield request
-      },
+    unsubscribe = onInboundMessage(async (message: ClientToServerMessage) => {
+      if (message.type !== 'input' || isHandled) return
+
+      const response = message.data
+      if (typeof response !== 'object' || response === null) {
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error('Invalid response format'))
+        return
+      }
+
+      const { files, error, content } = response as {
+        files?: Record<string, string> | unknown
+        error?: string
+        content?: unknown
+      }
+
+      if (error) {
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error(error))
+        return
+      }
+
+      // Reject if content or files exist but are not in the expected format
+      if (content !== undefined || (files !== undefined && typeof files !== 'object')) {
+        logger.debug('Rejecting due to invalid format:', { content, files })
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error('Invalid response format'))
+        return
+      }
+
+      if (files && typeof files === 'object') {
+        try {
+          const decompressedFiles = Object.fromEntries(
+            await Promise.all(
+              Object.entries(files).map(async ([path, content]) => [
+                path,
+                await decompressAndDecodeFile(content),
+              ])
+            )
+          )
+          isHandled = true
+          if (timeoutId) clearTimeout(timeoutId)
+          if (unsubscribe) unsubscribe()
+          resolve(decompressedFiles)
+          return
+        } catch (error) {
+          isHandled = true
+          if (timeoutId) clearTimeout(timeoutId)
+          if (unsubscribe) unsubscribe()
+          reject(new Error('Invalid response format'))
+          return
+        }
+      }
+
+      isHandled = true
+      if (timeoutId) clearTimeout(timeoutId)
+      if (unsubscribe) unsubscribe()
+      reject(new Error('Response missing both files and error'))
     })
-    const reader = response.body?.getReader()
-    if (!reader) throw new Error('Failed to create stream reader')
 
-    // Create response promise
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reader.releaseLock()
-        reject(new Error('Directory request timeout'))
-      }, config.userInputTimeout)
-
-      // Read response stream
-      readClientStream(reader)
-        .next()
-        .then(({ value, done }) => {
-          clearTimeout(timeout)
-          if (done) {
-            reject(new Error('Stream ended without response'))
-            return
-          }
-
-          if (value?.type === 'edit' && typeof value.data === 'object' && value.data !== null) {
-            const { files, error } = value.data as {
-              files?: Record<string, string>
-              error?: string
-            }
-
-            if (error) {
-              logger.error(`Error reading directory ${path}: ${error}`)
-              reject(new Error(error))
-              return
-            }
-
-            if (files) {
-              resolve(files)
-              return
-            }
-
-            reject(new Error('Response missing both files and error'))
-            return
-          }
-
-          reject(new Error('Invalid response type'))
-        })
-        .catch(error => {
-          clearTimeout(timeout)
-          logger.error(`Failed to process directory response: ${error}`)
-          reject(error)
-        })
+    setupTimeout()
+    broadcast(request).catch(error => {
+      if (!isHandled) {
+        isHandled = true
+        if (timeoutId) clearTimeout(timeoutId)
+        if (unsubscribe) unsubscribe()
+        reject(new Error(`Failed to read directory: ${error.message}`))
+      }
     })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    logger.error(`Directory operation error: ${message}`)
-    throw new Error(`Failed to read directory: ${message}`)
-  }
+  })
 }

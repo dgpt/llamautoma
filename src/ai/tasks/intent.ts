@@ -1,9 +1,9 @@
-import { BaseMessage, HumanMessage, SystemMessage, MessageContent } from '@langchain/core/messages'
+import { BaseMessage, SystemMessage } from '@langchain/core/messages'
 import { z } from 'zod'
 import { createStructuredLLM } from '@/ai/llm'
 import { logger } from '@/logger'
 import { task } from '@langchain/langgraph'
-import { RunnableConfig } from '@langchain/core/runnables'
+import { RunnableConfig, TaskType } from '@/types'
 
 // Schema for intent classification
 const IntentSchema = z.object({
@@ -12,29 +12,15 @@ const IntentSchema = z.object({
     .describe(
       'The type of response needed: code for code generation, chat for natural conversation'
     ),
+  messageReferenced: z
+    .string()
+    .describe("The user's message you are referencing to make your determination"),
   explanation: z.string().describe('Brief explanation of why you chose this classification'),
 })
 
 export type Intent = z.infer<typeof IntentSchema>
 
-const intent = createStructuredLLM<Intent>(IntentSchema)
-
-/**
- * Converts MessageContent to a string representation
- */
-function getMessageString(content: MessageContent): string {
-  if (typeof content === 'string') {
-    return content
-  }
-  return content
-    .map(item => {
-      if (typeof item === 'string') return item
-      if (item.type === 'text') return item.text
-      return ''
-    })
-    .filter(Boolean)
-    .join(' ')
-}
+const intent = createStructuredLLM<Intent>(IntentSchema, TaskType.Intent)
 
 /**
  * Determines the intent of the user's query
@@ -50,66 +36,36 @@ export const intentTask = task(
     },
     config?: RunnableConfig
   ): Promise<Intent> => {
-    // Find the last user message
-    const lastUserMessage = [...input.messages].reverse().find(msg => msg instanceof HumanMessage)
-    if (!lastUserMessage) {
-      throw new Error('No user message found in conversation history')
+    const prompt = `You are an AI intent classifier integrated into a code editing assistant. Your sole task is to analyze the entire conversation history along with the user’s latest message and determine whether the user’s intent is to write code (label: "code") or to receive a simple, non-code response (label: "chat").
+
+Guidelines:
+1. If the message explicitly or implicitly requests help with code (e.g., debugging, writing, or modifying code) or mentions code-related keywords (like function, variable, snippet, etc.), classify as "code".
+2. If the message is general or unrelated to code tasks, classify as "chat".
+3. In ambiguous cases where code-related intent is not clear, default to "code" if any code-relevant context is present.
+4. Provide a concise, step-by-step explanation of your decision. Use a chain-of-thought style: list the key indicators that led to your choice.
+5. Do not generate any additional text or answer the user's query—only classify the intent.
+6. Your output must be a valid JSON object exactly in the following format:
+{
+  "type": "code" or "chat",
+  "explanation": "Step-by-step reasoning: ...",
+  "messageReferenced": "The exact text of the user's message you based your decision on"
+}
+
+Remember: Your output should include only the JSON object and nothing else.
+`
+
+    try {
+      const result = await intent.invoke([...input.messages, new SystemMessage(prompt)], config)
+      logger.debug(result)
+      return result
+    } catch (error) {
+      logger.error({ error }, 'Error in intent task')
+      // Default to code for implementation-related errors
+      return {
+        type: 'code',
+        explanation: 'Defaulting to code due to error in classification',
+        messageReferenced: 'No message referenced',
+      }
     }
-
-    const messageString = getMessageString(lastUserMessage.content)
-
-    const prompt = `You are an assistant that must analyze a message and determine its intent.
-
-Your task is to classify the message into one of two categories:
-1. "chat" - for natural conversation and questions
-2. "code" - for code-related requests and actions
-
-You MUST respond with a JSON object containing:
-- "type": either "chat" or "code"
-- "explanation": a brief explanation of your classification
-
-Examples of valid responses:
-
-For a chat message:
-{
-  "type": "chat",
-  "explanation": "This is a general question about programming concepts that doesn't require writing code."
-}
-
-For a code request:
-{
-  "type": "code",
-  "explanation": "The user is asking for a specific code implementation of a feature."
-}
-
-Guidelines for classification:
-
-"chat" type messages:
-- General questions about concepts
-- Questions about the codebase or workspace
-- Requests for explanations
-- Non-coding tasks
-- Information seeking queries
-
-"code" type messages:
-- Requests to write or modify code
-- Bug fixes
-- Test writing
-- File operations
-- Implementation requests
-- Debugging help
-
-Remember:
-1. ONLY output a single JSON object
-2. The JSON MUST have both "type" and "explanation" fields
-3. "type" MUST be either "chat" or "code"
-4. "explanation" MUST be a string explaining your choice
-5. NO text outside the JSON object
-
-Now analyze this message: "${messageString}"`
-
-    const result = await intent.invoke([new SystemMessage(prompt), new HumanMessage(messageString)])
-    logger.debug(result)
-    return result
   }
 )

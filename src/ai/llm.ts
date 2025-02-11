@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { ChatOllama } from '@langchain/ollama'
-import { DEFAULT_CONFIG } from 'llamautoma-types'
+import { DEFAULT_CONFIG, TEST_CONFIG } from '@/config'
 import { StructuredOutputParser } from '@langchain/core/output_parsers'
-import { SystemMessage, BaseMessage } from '@langchain/core/messages'
-import { logger } from '@/logger'
+import { BaseMessage } from '@langchain/core/messages'
 import { PromptTemplate } from '@langchain/core/prompts'
 import { RunnableSequence } from '@langchain/core/runnables'
+import { TaskType } from '@/types'
 
 // Schema for feedback
 export const feedbackSchema = z.object({
@@ -16,31 +16,45 @@ export const feedbackSchema = z.object({
 
 export type Feedback = z.infer<typeof feedbackSchema>
 
-// Constants
-const DEFAULT_MODEL = 'qwen2.5-coder:7b'
-const TEST_MODEL = 'qwen2.5-coder:1.5b'
-const DEFAULT_HOST = 'http://localhost:11434'
+/**
+ * Create a ChatOllama instance for a specific task type
+ */
+export function createLLM(taskType: TaskType, config = DEFAULT_CONFIG) {
+  const modelName = process.env.NODE_ENV === 'test' ? TEST_CONFIG.models : config.models
 
-// Create base LLM instance
-export const llm = new ChatOllama({
-  model: process.env.NODE_ENV === 'test' ? TEST_MODEL : DEFAULT_MODEL,
-  baseUrl: DEFAULT_HOST,
-})
+  // Select the appropriate model based on task type
+  let model: string
+  switch (taskType) {
+    case TaskType.Code:
+      model = modelName.coder
+      break
+    case TaskType.Intent:
+      model = modelName.intent
+      break
+    case TaskType.Plan:
+      model = modelName.planner
+      break
+    case TaskType.Review:
+      model = modelName.reviewer
+      break
+    case TaskType.Summarize:
+      model = modelName.summarizer
+      break
+    default:
+      model = modelName.coder
+  }
 
-const requirements = `
-DO NOT include comments, code snippets, etc. outside of valid JSON strings.
-ONLY respond with valid JSON.
-ALL strings MUST be terminated properly and all special characters MUST be escaped.
-Your response MUST conform to the provided JSON schema.
-Your response MUST follow additional instructions supplied in the conversation context.
-`
+  return new ChatOllama({
+    model,
+    baseUrl: config.server.host,
+  })
+}
 
 /**
  * Create a structured LLM that outputs according to a schema
  */
-export function createStructuredLLM<T>(schema: z.ZodType<T>) {
+export function createStructuredLLM<T>(schema: z.ZodType<T>, taskType: TaskType = TaskType.Code) {
   const parser = StructuredOutputParser.fromZodSchema(schema)
-
   const formatInstructions = parser.getFormatInstructions()
 
   const prompt = PromptTemplate.fromTemplate(`{format_instructions}
@@ -53,7 +67,7 @@ export function createStructuredLLM<T>(schema: z.ZodType<T>) {
       input: (messages: BaseMessage[]) => messages.map(m => m.content).join('\n'),
     },
     prompt,
-    llm,
+    createLLM(taskType),
     parser,
   ])
 
@@ -61,7 +75,4 @@ export function createStructuredLLM<T>(schema: z.ZodType<T>) {
 }
 
 // Export for testing
-export const testLLM = new ChatOllama({
-  model: TEST_MODEL,
-  baseUrl: DEFAULT_HOST,
-})
+export const testLLM = createLLM(TaskType.Code, TEST_CONFIG)

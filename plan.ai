@@ -380,3 +380,40 @@ for await (const step of stream) {
 - **Compression** → Use brotli for file content compression
 - **Error Handling** → Handle errors gracefully at boundaries
 - **Documentation** → Document public APIs and complex logic
+
+## Stream Implementation (src/stream.ts)
+
+### Core Requirements
+1. Streaming Functionality:
+   - `listen()`: Listens for client messages on stream, sends chunked data to listener
+   - `broadcast()`: Sends chunked data to stream
+   - `broadcastProgress()`: Sends progress update to stream (displayed at bottom of chat window)
+   - `broadcastMessage()`: Sends user-visible message to stream (displayed in chat window)
+
+2. Message Processing:
+   - All outgoing messages MUST be compressed and encoded using encodeAndCompressMessage
+   - All incoming messages MUST be decompressed and decoded using decodeAndDecompressMessage
+   - Entire system MUST interface with the same stream
+   - Both broadcast and listen MUST use the SAME STREAM
+
+3. Testing Requirements:
+   - Use bun:test for all testing
+   - NO MOCKING in stream.test.ts
+   - Tests use qwen2.5-coder:1.5b model for performance
+   - Follow TDD development process
+   - 100% test coverage required
+   - Only mock 3rd party services that CANNOT be run locally
+   - Test file names must match source files (e.g. file.test.ts tests file.ts)
+
+4. Code Standards:
+   - No major changes to stream.ts allowed
+   - Minor changes only if absolutely necessary
+   - Maintain existing functionality
+   - Refactor dependent files to reflect changes
+   - No backwards compatibility required
+
+5. Stream Implementation Details
+   - Use TransformStream for bidirectional communication
+   - Handle message compression/decompression
+   - Maintain proper error handling
+   - Clean up resources appropriately

@@ -1,6 +1,6 @@
 import { llm } from '../llm'
 import { getMessageString } from '../tasks/lib'
-import { broadcastProgress, broadcastMessage } from '../../stream'
+import { broadcast } from '../../stream'
 import { BaseMessage, HumanMessage } from '@langchain/core/messages'
 import { task } from '@langchain/langgraph'
 import { ReviewerTaskSchema } from './schemas/tasks'
@@ -20,7 +20,7 @@ export const reviewerTask = task(
     config?: LlamautomaConfig
   ) => {
     // Update initial progress
-    broadcastProgress('Reviewing code...', config?.configurable)
+    broadcast('Reviewing code...', 'progress')
 
     // Convert messages to string for context
     const context = input.messages.map(getMessageString).join('\n')
@@ -57,7 +57,7 @@ export const reviewerTask = task(
     const feedback = responseContent.split('\n').slice(1).join('\n').trim()
 
     // Update progress with completion
-    broadcastMessage(`Review ${approved ? 'approved' : 'rejected'}`, config?.configurable)
+    broadcast(`Review ${approved ? 'approved' : 'rejected'}`, 'chat')
 
     // Return result in expected schema format
     return ReviewerTaskSchema.parse({

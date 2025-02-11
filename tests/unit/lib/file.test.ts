@@ -1,343 +1,316 @@
-import { expect, test, describe, mock, beforeEach, afterEach } from 'bun:test'
+import { expect, test, describe, spyOn, beforeEach, afterEach } from 'bun:test'
 import { getFile, getDirectory } from '@/lib/file'
-import { DEFAULT_AGENT_CONFIG } from '@/types'
-import { mockClientResponse, mockStream } from '@/tests/unit/utils'
-import { compressAndEncodeMessage } from '@/lib/compression'
-import * as streamModule from '@/stream'
-import type { StreamMessage } from '@/stream'
+import * as stream from '@/stream'
+import * as compression from '@/lib/compression'
+import { DEFAULT_CONFIG } from '@/config'
+import type { ClientToServerMessage } from '@/stream'
 
 describe('File Library', () => {
-  let mockResponse: ReturnType<typeof mock>
+  // Mock dependencies
+  let broadcastSpy: ReturnType<typeof spyOn>
+  let onInboundMessageSpy: ReturnType<typeof spyOn>
+  let decompressAndDecodeFileSpy: ReturnType<typeof spyOn>
+  let unsubscribeMock: () => void
 
   beforeEach(() => {
-    mockResponse = mock(() => {})
-    mockResponse.prototype = Response.prototype
+    // Mock stream functions
+    broadcastSpy = spyOn(stream, 'broadcast')
+    onInboundMessageSpy = spyOn(stream, 'onInboundMessage')
+
+    // Mock compression
+    decompressAndDecodeFileSpy = spyOn(compression, 'decompressAndDecodeFile')
+
+    // Setup default mocks
+    unsubscribeMock = () => {}
+    onInboundMessageSpy.mockImplementation((handler: (message: ClientToServerMessage) => void) => {
+      setTimeout(() => {
+        handler({
+          type: 'input',
+          data: { content: '~test content' },
+          timestamp: Date.now(),
+        })
+      }, 0)
+      return unsubscribeMock
+    })
+
+    broadcastSpy.mockImplementation(() => Promise.resolve())
+    decompressAndDecodeFileSpy.mockImplementation(async (content: string) =>
+      content.startsWith('~') ? content.slice(1) : content
+    )
   })
 
   afterEach(() => {
-    mock.restore()
+    broadcastSpy.mockRestore()
+    onInboundMessageSpy.mockRestore()
+    decompressAndDecodeFileSpy.mockRestore()
   })
 
-  const testConfig = {
-    ...DEFAULT_AGENT_CONFIG,
-    userInputTimeout: 100, // Short timeout for faster tests
-  }
-
   describe('getFile', () => {
-    test('should get file content', async () => {
-      const content = 'test content'
-      mockClientResponse(mockResponse, { content })
+    test('should get file content successfully', async () => {
+      const content = await getFile('test.ts')
 
-      const result = await getFile('test.ts', testConfig)
-      expect(result).toBe(content)
-      expect(mockResponse).toHaveBeenCalled()
+      expect(content).toBe('test content')
+      expect(broadcastSpy).toHaveBeenCalledWith({
+        type: 'edit',
+        data: {
+          path: 'test.ts',
+          action: 'read',
+        },
+        timestamp: expect.any(Number),
+      })
     })
 
-    test('should propagate file error from response', async () => {
-      const error = 'test error'
-      mockClientResponse(mockResponse, { error })
+    test('should handle broadcast errors', async () => {
+      broadcastSpy.mockImplementation(() => Promise.reject(new Error('Broadcast failed')))
 
-      const promise = getFile('test.ts', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty('message', error)
-      expect(mockResponse).toHaveBeenCalled()
+      await expect(getFile('test.ts')).rejects.toThrow('Failed to read file: Broadcast failed')
     })
 
-    test('should timeout when no response received', async () => {
-      mockStream(mockResponse, new ReadableStream({ start() {} }))
+    test('should handle timeout', async () => {
+      onInboundMessageSpy.mockImplementation(() => unsubscribeMock)
 
-      const promise = getFile('test.ts', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty('message', expect.stringContaining('timeout'))
-    }, 1000)
-
-    test('should reject when response missing required fields', async () => {
-      mockClientResponse(mockResponse, {})
-
-      const promise = getFile('test.ts', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
+      await expect(getFile('test.ts', { ...DEFAULT_CONFIG, timeout: 1 })).rejects.toThrow(
+        'File request timeout'
+      )
     })
 
-    test('should reject when response body missing', async () => {
-      mockResponse.mockImplementation(() => ({ body: null }) as Response)
-
-      const promise = getFile('test.ts', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-    })
-
-    test('should reject non-edit response type', async () => {
-      mockClientResponse(mockResponse, { type: 'chat', data: {} })
-
-      const promise = getFile('test.ts', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      expect(mockResponse).toHaveBeenCalled()
-    })
-
-    test('should propagate stream errors', async () => {
-      const streamError = new Error('test stream error')
-      mockStream(
-        mockResponse,
-        new ReadableStream({
-          start(controller) {
-            controller.error(streamError)
-          },
-        })
+    test('should handle invalid response format', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: 'invalid',
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
       )
 
-      const promise = getFile('test.ts', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty(
-        'message',
-        expect.stringContaining(streamError.message)
-      )
-      expect(mockResponse).toHaveBeenCalled()
+      await expect(getFile('test.ts')).rejects.toThrow('Invalid response format')
     })
 
-    test('should handle file read timeout', async () => {
-      const path = 'test.ts'
-      const config = {
-        ...DEFAULT_AGENT_CONFIG,
-        userInputTimeout: 100,
-      }
-
-      mockStream(
-        mockResponse,
-        new ReadableStream({
-          start(controller) {
-            setTimeout(() => {
-              controller.close()
-            }, 200)
-          },
-        })
+    test('should handle error in response', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: { error: 'File not found' },
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
       )
 
-      await expect(getFile(path, config)).rejects.toThrow('File request timeout')
-    })
-
-    test('should handle stream ending without response', async () => {
-      const path = 'test.ts'
-      mockStream(
-        mockResponse,
-        new ReadableStream({
-          start(controller) {
-            controller.close()
-          },
-        })
-      )
-
-      await expect(getFile(path)).rejects.toThrow('Stream ended without response')
-    })
-
-    test('should handle invalid response type', async () => {
-      const path = 'test.ts'
-      mockClientResponse(mockResponse, { type: 'invalid', data: {} })
-
-      const promise = getFile(path)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty(
-        'message',
-        'Response missing both content and error'
-      )
+      await expect(getFile('test.ts')).rejects.toThrow('File not found')
     })
 
     test('should handle missing content and error', async () => {
-      const path = 'test.ts'
-      mockClientResponse(mockResponse, { type: 'edit', data: {} })
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: {},
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
+      )
 
-      await expect(getFile(path)).rejects.toThrow()
+      await expect(getFile('test.ts')).rejects.toThrow('Response missing both content and error')
     })
 
-    test('should handle stream reader creation failure', async () => {
-      const path = 'test.ts'
-      mockResponse.mockImplementation(() => ({ body: null }) as Response)
+    test('should handle decompression errors', async () => {
+      decompressAndDecodeFileSpy.mockImplementation(() =>
+        Promise.reject(new Error('Decompression failed'))
+      )
 
-      await expect(getFile(path)).rejects.toThrow()
+      await expect(getFile('test.ts')).rejects.toThrow('Invalid response format')
     })
   })
 
   describe('getDirectory', () => {
-    test('should get directory files', async () => {
-      const files = { 'test/test.ts': 'content', 'test/test2.ts': 'content2' }
-      mockClientResponse(mockResponse, { files })
-
-      const result = await getDirectory('test', testConfig)
-      expect(result).toEqual(files)
-      expect(mockResponse).toHaveBeenCalled()
-    })
-
-    test('should propagate directory error from response', async () => {
-      const error = 'test error'
-      mockClientResponse(mockResponse, { error })
-
-      const promise = getDirectory('test', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty('message', error)
-      expect(mockResponse).toHaveBeenCalled()
-    })
-
-    test('should timeout when no response received', async () => {
-      mockStream(mockResponse, new ReadableStream({ start() {} }))
-
-      const promise = getDirectory('test', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty('message', expect.stringContaining('timeout'))
-      expect(mockResponse).toHaveBeenCalled()
-    }, 1000)
-
-    test('should reject when response missing required fields', async () => {
-      mockClientResponse(mockResponse, {})
-
-      const promise = getDirectory('test', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-    })
-
-    test('should reject when response body missing', async () => {
-      mockResponse.mockImplementation(() => ({ body: null }) as Response)
-
-      const promise = getDirectory('test', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-    })
-
-    test('should reject non-edit response type', async () => {
-      mockClientResponse(mockResponse, { type: 'chat', data: {} })
-
-      const promise = getDirectory('test', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-    })
-
-    test('should propagate stream errors', async () => {
-      const streamError = new Error('test stream error')
-      mockStream(
-        mockResponse,
-        new ReadableStream({
-          start(controller) {
-            controller.error(streamError)
-          },
-        })
+    test('should get directory contents successfully', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: {
+                files: {
+                  'test1.ts': '~content1',
+                  'test2.ts': '~content2',
+                },
+              },
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
       )
 
-      const promise = getDirectory('test', testConfig)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty(
-        'message',
-        expect.stringContaining(streamError.message)
-      )
-      expect(mockResponse).toHaveBeenCalled()
+      const files = await getDirectory('src')
+
+      expect(files).toEqual({
+        'test1.ts': 'content1',
+        'test2.ts': 'content2',
+      })
+      expect(broadcastSpy).toHaveBeenCalledWith({
+        type: 'edit',
+        data: {
+          path: 'src',
+          action: 'readdir',
+          includePattern: undefined,
+          excludePattern: undefined,
+        },
+        timestamp: expect.any(Number),
+      })
     })
 
-    test('should handle directory read timeout', async () => {
-      const path = 'test'
-      const config = {
-        ...DEFAULT_AGENT_CONFIG,
-        userInputTimeout: 100,
-      }
+    test('should handle broadcast errors', async () => {
+      broadcastSpy.mockImplementation(() => Promise.reject(new Error('Broadcast failed')))
 
-      mockStream(
-        mockResponse,
-        new ReadableStream({
-          start(controller) {
-            setTimeout(() => {
-              controller.close()
-            }, 200)
-          },
-        })
+      await expect(getDirectory('src')).rejects.toThrow(
+        'Failed to read directory: Broadcast failed'
       )
-
-      await expect(getDirectory(path, config)).rejects.toThrow('Directory request timeout')
     })
 
-    test('should handle stream ending without response', async () => {
-      const path = 'test'
-      mockStream(
-        mockResponse,
-        new ReadableStream({
-          start(controller) {
-            controller.close()
-          },
-        })
-      )
+    test('should handle timeout', async () => {
+      onInboundMessageSpy.mockImplementation(() => unsubscribeMock)
 
-      await expect(getDirectory(path)).rejects.toThrow('Stream ended without response')
+      await expect(getDirectory('src', { ...DEFAULT_CONFIG, timeout: 1 })).rejects.toThrow(
+        'Directory request timeout'
+      )
     })
 
-    test('should handle invalid response type', async () => {
-      const path = 'test'
-      mockClientResponse(mockResponse, { type: 'invalid', data: {} })
-
-      const promise = getDirectory(path)
-      await expect(promise).rejects.toBeInstanceOf(Error)
-      await expect(promise).rejects.toHaveProperty(
-        'message',
-        'Response missing both files and error'
+    test('should handle invalid response format', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: 'invalid',
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
       )
+
+      await expect(getDirectory('src')).rejects.toThrow('Invalid response format')
+    })
+
+    test('should handle error in response', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: { error: 'Directory not found' },
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
+      )
+
+      await expect(getDirectory('src')).rejects.toThrow('Directory not found')
+    })
+
+    test('should handle invalid files format', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: { files: 'invalid' },
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
+      )
+
+      await expect(getDirectory('src')).rejects.toThrow('Invalid response format')
     })
 
     test('should handle missing files and error', async () => {
-      const path = 'test'
-      mockClientResponse(mockResponse, { type: 'edit', data: {} })
-
-      await expect(getDirectory(path)).rejects.toThrow()
-    })
-
-    test('should handle stream reader creation failure', async () => {
-      const path = 'test'
-      mockResponse.mockImplementation(() => ({ body: null }) as Response)
-
-      await expect(getDirectory(path)).rejects.toThrow()
-    })
-
-    test('should pass include and exclude patterns', async () => {
-      const files = { 'test/test.ts': 'content' }
-      let capturedRequest: any
-      let capturePromise = Promise.resolve()
-
-      // Mock the response with proper message structure
-      mockClientResponse(mockResponse, { files })
-
-      // Mock the stream module
-      const streamSpy = mock.module('@/stream', () => ({
-        ...streamModule,
-        createStreamResponse: (messages: AsyncIterable<StreamMessage>) => {
-          console.log('createStreamResponse called')
-          // Capture the first message from the iterator
-          capturePromise = messages[Symbol.asyncIterator]()
-            .next()
-            .then(({ value }) => {
-              console.log('Request captured:', value)
-              capturedRequest = value
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: {},
+              timestamp: Date.now(),
             })
-          // Return a new response with the mock stream
-          return new Response(
-            new ReadableStream({
-              start(controller) {
-                const compressed = compressAndEncodeMessage({ type: 'edit', data: { files } })
-                controller.enqueue(new TextEncoder().encode(`data: ${compressed}\n\n`))
-                controller.close()
+          }, 0)
+          return unsubscribeMock
+        }
+      )
+
+      await expect(getDirectory('src')).rejects.toThrow('Response missing both files and error')
+    })
+
+    test('should handle decompression errors', async () => {
+      decompressAndDecodeFileSpy.mockImplementation(() =>
+        Promise.reject(new Error('Decompression failed'))
+      )
+
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: {
+                files: {
+                  'test.ts': '~invalid',
+                },
               },
-            }),
-            {
-              headers: {
-                'Content-Type': 'text/event-stream',
-                'Cache-Control': 'no-cache',
-                Connection: 'keep-alive',
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
+      )
+
+      await expect(getDirectory('src')).rejects.toThrow('Invalid response format')
+    })
+
+    test('should handle include/exclude patterns', async () => {
+      onInboundMessageSpy.mockImplementation(
+        (handler: (message: ClientToServerMessage) => void) => {
+          setTimeout(() => {
+            handler({
+              type: 'input',
+              data: {
+                files: {
+                  'test.ts': '~content',
+                },
               },
-            }
-          )
+              timestamp: Date.now(),
+            })
+          }, 0)
+          return unsubscribeMock
+        }
+      )
+
+      const files = await getDirectory('src', DEFAULT_CONFIG, '*.ts', '*.test.ts')
+
+      expect(broadcastSpy).toHaveBeenCalledWith({
+        type: 'edit',
+        data: {
+          path: 'src',
+          action: 'readdir',
+          includePattern: '*.ts',
+          excludePattern: '*.test.ts',
         },
-      }))
-
-      const result = await getDirectory('test', testConfig, '*.ts', '*.test.ts')
-      console.log('Result received:', result)
-      await capturePromise
-      console.log('Request captured:', capturedRequest)
-
-      // Verify the result
-      expect(result).toEqual(files)
-      expect(mockResponse).toHaveBeenCalledTimes(1)
-
-      // Verify the request patterns
-      expect(capturedRequest.data).toHaveProperty('includePattern', '*.ts')
-      expect(capturedRequest.data).toHaveProperty('excludePattern', '*.test.ts')
+        timestamp: expect.any(Number),
+      })
     })
   })
 })

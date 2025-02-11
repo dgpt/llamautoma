@@ -86,9 +86,14 @@ const toolTask = task('tools', async state => {
  */
 const workflow = entrypoint(
   { checkpointer, name: 'llamautoma' },
-  async (input: { messages: BaseMessage[] }, config?: RunnableConfig) => {
+  async (input: { messages: BaseMessage[]; config?: Config }, config?: RunnableConfig) => {
+    const runnableConfig = {
+      ...config,
+      config: input.config || DEFAULT_CONFIG,
+    }
+
     // Determine intent first
-    const intentResult = await intentTask.invoke(input, config)
+    const intentResult = await intentTask.invoke({ messages: input.messages }, runnableConfig)
 
     // If chat intent, return direct LLM response
     if (intentResult.type === 'chat') {
@@ -101,14 +106,13 @@ const workflow = entrypoint(
 
     // Check if we need to summarize (configurable threshold)
     let messages = input.messages
-    if (messages.length > 10) {
-      // TODO: Make configurable
-      const summaryResult = await summarizerTask.invoke({ messages }, config)
+    if (messages.length > (input.config?.memory?.maxContextTokens || 10)) {
+      const summaryResult = await summarizerTask.invoke({ messages }, runnableConfig)
       messages = summaryResult.messages
     }
 
     // Generate plan
-    const planResult = await plannerTask.invoke({ messages }, config)
+    const planResult = await plannerTask.invoke({ messages }, runnableConfig)
 
     // Review plan
     let planReviewResult = await reviewerTask.invoke(
@@ -116,23 +120,23 @@ const workflow = entrypoint(
         messages,
         plan: planResult.plan,
       },
-      config
+      runnableConfig
     )
 
-    // Retry planning if review fails (up to 3 times)
+    // Retry planning if review fails (up to configured max iterations)
     let attempts = 0
-    while (!planReviewResult.approved && attempts < 3) {
+    const maxAttempts = input.config?.maxIterations || 3
+    while (!planReviewResult.approved && attempts < maxAttempts) {
       const newPlanResult = await plannerTask.invoke(
         {
           messages: [
             ...messages,
-            {
-              type: 'system',
+            new SystemMessage({
               content: `Previous plan rejected. Feedback: ${planReviewResult.feedback}`,
-            },
+            }),
           ],
         },
-        config
+        runnableConfig
       )
 
       planReviewResult = await reviewerTask.invoke(
@@ -140,7 +144,7 @@ const workflow = entrypoint(
           messages,
           plan: newPlanResult.plan,
         },
-        config
+        runnableConfig
       )
 
       attempts++
@@ -152,7 +156,7 @@ const workflow = entrypoint(
         messages,
         plan: planResult.plan,
       },
-      config
+      runnableConfig
     )
 
     // Generate compressed diffs for client
@@ -164,23 +168,22 @@ const workflow = entrypoint(
         messages,
         code: codeResult,
       },
-      config
+      runnableConfig
     )
 
-    // Retry code generation if review fails (up to 3 times)
+    // Retry code generation if review fails (up to configured max iterations)
     attempts = 0
-    while (!codeReviewResult.approved && attempts < 3) {
+    while (!codeReviewResult.approved && attempts < maxAttempts) {
       const newCodeResult = await coder.invoke(
         {
           messages: [
             ...messages,
-            {
-              type: 'system',
+            new SystemMessage({
               content: `Previous code rejected. Feedback: ${codeReviewResult.feedback}`,
-            },
+            }),
           ],
         },
-        config
+        runnableConfig
       )
 
       codeReviewResult = await reviewerTask.invoke(
@@ -188,7 +191,7 @@ const workflow = entrypoint(
           messages,
           code: newCodeResult,
         },
-        config
+        runnableConfig
       )
 
       attempts++
@@ -218,10 +221,13 @@ const workflow = entrypoint(
 export const llamautoma = {
   invoke: async (input, config) => {
     const result = await workflow.invoke(
-      { messages: input.messages || [] },
+      {
+        messages: input.messages || [],
+        config: input.config,
+      },
       {
         configurable: {
-          thread_id: input.id || 'default',
+          thread_id: input.threadId || 'default',
           checkpoint_ns: 'llamautoma',
           ...config?.configurable,
         },
@@ -232,10 +238,13 @@ export const llamautoma = {
 
   stream: async function* (input, config) {
     const stream = await workflow.stream(
-      { messages: input.messages || [] },
+      {
+        messages: input.messages || [],
+        config: input.config,
+      },
       {
         configurable: {
-          thread_id: input.id || 'default',
+          thread_id: input.threadId || 'default',
           checkpoint_ns: 'llamautoma',
           ...config?.configurable,
         },
@@ -244,25 +253,29 @@ export const llamautoma = {
     )
 
     for await (const chunk of stream) {
-      // Compress streaming responses for client
+      // Handle streaming responses
       if (chunk.streamResponses) {
         for (const response of chunk.streamResponses) {
           yield {
-            type: response.type,
-            content: compressAndEncodeMessage(response.content),
+            type: response.type || 'progress',
+            content: response.content,
+            data: response.data,
+            messages: response.messages,
+            response: response.response,
             metadata: response.metadata,
-            timestamp: response.timestamp,
+            timestamp: Date.now(),
           }
         }
-      }
-
-      // Compress final result for client
-      if (chunk.type === 'complete') {
+      } else {
+        // Handle final response
         yield {
-          type: 'complete',
-          content: compressAndEncodeMessage(chunk.content),
+          type: chunk.type || 'complete',
+          content: chunk.content,
+          data: chunk.data,
+          messages: chunk.messages,
+          response: chunk.response,
           metadata: chunk.metadata,
-          timestamp: chunk.timestamp,
+          timestamp: Date.now(),
         }
       }
     }

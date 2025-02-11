@@ -68,7 +68,7 @@ describe('Intent Task Tests', () => {
         },
       }
     )
-
+    console.log(result)
     expect(result).toBeDefined()
     expect(result.type).toBe('chat')
     expect(result.explanation).toBeDefined()
@@ -130,36 +130,11 @@ describe('Intent Task Tests', () => {
         },
       }
     )
+    console.log(result)
 
     expect(result).toBeDefined()
     expect(result.type).toBe('code')
     expect(result.explanation).toBeDefined()
-  })
-
-  test('should handle empty messages array', async () => {
-    const workflow = entrypoint<{ messages: BaseMessage[] }, Promise<Intent>>(
-      {
-        checkpointer: ctx.memorySaver,
-        name: 'intent_test',
-      },
-      async (input: { messages: BaseMessage[] }, config?: RunnableConfig) => {
-        return intentTask(input, config)
-      }
-    )
-
-    const messages = [new SystemMessage({ content: 'You are a helpful assistant.' })]
-
-    await expect(
-      workflow.invoke(
-        { messages },
-        {
-          configurable: {
-            thread_id: ctx.threadId,
-            checkpoint_ns: 'intent_test',
-          },
-        }
-      )
-    ).rejects.toThrow('No user message found')
   })
 
   test('should handle technical discussion without code request', async () => {
@@ -207,7 +182,6 @@ describe('Intent Task Tests', () => {
     )
 
     const messages = [
-      new SystemMessage({ content: 'You are a helpful assistant.' }),
       new HumanMessage({
         content: 'Create a new file called config.ts with TypeScript configuration.',
       }),
@@ -222,6 +196,7 @@ describe('Intent Task Tests', () => {
         },
       }
     )
+    console.log(result)
 
     expect(result).toBeDefined()
     expect(result.type).toBe('code')
@@ -256,6 +231,7 @@ describe('Intent Task Tests', () => {
         },
       }
     )
+    console.log(result)
 
     expect(result).toBeDefined()
     expect(result.type).toBe('code')

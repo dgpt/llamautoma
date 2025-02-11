@@ -1,6 +1,6 @@
 import { compressAndEncodeMessage, decodeAndDecompressMessage } from '@/lib/compression'
 import { logger } from '@/logger'
-import type {
+import {
   ServerToClientMessage as ServerMessage,
   ClientToServerMessage as ClientMessage,
 } from '@/types/stream'
@@ -17,61 +17,55 @@ function createMessageStream() {
 
   // Message handlers
   const outboundHandlers = new Set<(message: string) => void>()
-  const inboundHandlers = new Set<(message: ClientMessage) => void>()
-
-  // Active listeners
-  const activeListeners = new Set<string>()
-
-  // Track processed messages to prevent duplicates
-  const processedMessages = new Set<string>()
+  const inboundHandlers = new Map<string, (message: ClientMessage) => void>()
 
   // Create shared stream
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
-  const writer = writable.getWriter()
-  const reader = readable.getReader()
+  let stream = new TransformStream<Uint8Array, Uint8Array>()
+  let writer: WritableStreamDefaultWriter<Uint8Array>
+  let reader: ReadableStreamDefaultReader<Uint8Array>
+
+  function initializeStream() {
+    stream = new TransformStream<Uint8Array, Uint8Array>()
+    writer = stream.writable.getWriter()
+    reader = stream.readable.getReader()
+  }
+
+  // Initialize stream
+  initializeStream()
+
+  // Track if we should continue listening
+  let isListening = false
 
   /**
    * Process incoming messages from a buffer
    */
   function processMessages(messages: string[]): void {
+    if (!isListening) return // Don't process messages if not listening
+
     for (const message of messages) {
       if (!message.startsWith('data: ')) continue
-
-      // Skip if message already processed
-      if (processedMessages.has(message)) continue
-      processedMessages.add(message)
 
       // Validate message format
       const messageContent = message.slice(6).trim()
 
-      const decoded = decodeAndDecompressMessage(messageContent)
-      // Process each message in the array
-      for (const msg of decoded) {
-        if (!msg || typeof msg !== 'object' || !('type' in msg) || !('content' in msg)) {
-          logger.error('Invalid message structure:', msg)
-          return // Stop processing all messages on invalid structure
-        }
+      try {
+        const decoded = decodeAndDecompressMessage(messageContent)
+        // Process each message in the array
+        for (const msg of decoded) {
+          // Convert server message to client message
+          const clientMessage: ClientMessage = {
+            type: 'input',
+            data: msg.content ?? msg.data ?? '', // Ensure empty string for empty content
+            timestamp: msg.timestamp || Date.now(),
+          }
 
-        // Validate message type and content
-        if (typeof msg.type !== 'string' || typeof msg.content !== 'string') {
-          logger.error('Invalid message type or content:', msg)
-          return // Stop processing all messages on invalid type/content
-        }
-
-        // Convert server message to client message
-        const clientMessage: ClientMessage = {
-          type: 'input',
-          data: msg.content,
-          timestamp: msg.timestamp,
-        }
-
-        for (const handler of inboundHandlers) {
-          try {
+          // Call all handlers with the message
+          for (const handler of inboundHandlers.values()) {
             handler(clientMessage)
-          } catch (error) {
-            logger.error('Inbound handler error:', error)
           }
         }
+      } catch (error) {
+        logger.error('Failed to decode message:', error)
       }
     }
   }
@@ -80,6 +74,7 @@ function createMessageStream() {
    * Write data to stream
    */
   async function write(data: string): Promise<void> {
+    if (!isListening) return // Don't write if not listening
     const formattedData = data.startsWith('data: ') ? data : `data: ${data}\n\n`
     await writer.write(encoder.encode(formattedData))
   }
@@ -87,52 +82,89 @@ function createMessageStream() {
   /**
    * Start listening to stream
    */
-  async function startListening(listenerId: string): Promise<void> {
+  async function startListening(): Promise<void> {
+    if (isListening) return
+    isListening = true
     let buffer = ''
-    activeListeners.add(listenerId)
 
-    while (activeListeners.has(listenerId)) {
-      const { done, value } = await reader.read()
-      if (done) break
+    try {
+      while (isListening && inboundHandlers.size > 0) {
+        try {
+          const result = await Promise.race([
+            reader.read(),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Stream read timeout')), 500)
+            ),
+          ])
 
-      buffer += decoder.decode(value)
-      const messages = buffer.split('\n\n')
-      buffer = messages.pop() || ''
+          if (result.done) break
 
-      processMessages(messages)
+          buffer += decoder.decode(result.value)
+          const messages = buffer.split('\n\n')
+          buffer = messages.pop() || ''
+
+          processMessages(messages)
+        } catch (error) {
+          // Handle stream read timeout by resetting and continuing
+          if (error instanceof Error && error.message === 'Stream read timeout') {
+            logger.debug('Stream read timeout - resetting stream')
+            await resetStream()
+            isListening = true
+            continue
+          }
+          // Any other error means we should stop listening
+          break
+        }
+      }
+    } finally {
+      isListening = false
     }
-    activeListeners.delete(listenerId)
   }
+
+  /**
+   * Reset the stream
+   */
+  async function resetStream() {
+    isListening = false
+
+    // Close existing streams - errors are expected and can be ignored
+    try {
+      await writer.close()
+    } catch {}
+    try {
+      await reader.cancel()
+    } catch {}
+
+    // Create new stream
+    initializeStream()
+  }
+
+  // Start listening when first handler is added
+  let listeningPromise: Promise<void> | null = null
 
   return {
     /**
-     * Listen for client messages
+     * Register a handler for inbound messages
+     * Returns a cleanup function to remove the handler
      */
-    listen(): string {
-      const listenerId = Bun.randomUUIDv7()
-      startListening(listenerId).catch(error => {
-        logger.error('Error in stream listener:', error)
-      })
-      return listenerId
+    onInboundMessage(handler: (message: ClientMessage) => void): () => void {
+      const handlerId = Bun.randomUUIDv7()
+      inboundHandlers.set(handlerId, handler)
+
+      // Start listening if this is the first handler
+      if (!listeningPromise && !isListening) {
+        listeningPromise = startListening()
+      }
+
+      // Return cleanup function
+      return () => {
+        inboundHandlers.delete(handlerId)
+      }
     },
 
     /**
-     * Stop a specific listener
-     */
-    async stopListener(listenerId: string): Promise<void> {
-      activeListeners.delete(listenerId)
-    },
-
-    /**
-     * Stop all listeners
-     */
-    async stopAllListeners(): Promise<void> {
-      activeListeners.clear()
-      processedMessages.clear()
-    },
-
-    /**
-     * Register outbound message handler
+     * Register a handler for outbound messages
+     * Returns a cleanup function to remove the handler
      */
     onOutboundMessage(handler: (message: string) => void): () => void {
       outboundHandlers.add(handler)
@@ -140,26 +172,35 @@ function createMessageStream() {
     },
 
     /**
-     * Register inbound message handler
+     * Stop all handlers and clean up resources
      */
-    onInboundMessage(handler: (message: ClientMessage) => void): () => void {
-      inboundHandlers.add(handler)
-      return () => inboundHandlers.delete(handler)
+    stopAllHandlers(): Promise<void> {
+      // Synchronously clear all handlers and state
+      isListening = false
+      inboundHandlers.clear()
+      outboundHandlers.clear()
+      listeningPromise = null
+
+      // Synchronously reset stream
+      try {
+        writer.close()
+        reader.cancel()
+      } catch (error) {
+        logger.error('Error closing stream:', error)
+      }
+
+      // Create new stream immediately
+      initializeStream()
+
+      // Return resolved promise since cleanup is done
+      return Promise.resolve()
     },
 
-    /**
-     * Broadcast a message to all outbound handlers and streams
-     */
-    async broadcast(
-      message: ServerMessage | ServerMessage[] | AsyncIterable<ServerMessage>
-    ): Promise<void> {
-      try {
-        const messages = Array.isArray(message)
-          ? message
-          : Symbol.asyncIterator in message
-            ? [...(await toArray(message))]
-            : [message]
+    async broadcast(message: ServerMessage | ServerMessage[]): Promise<void> {
+      if (!isListening) return // Don't broadcast if not listening
 
+      try {
+        const messages = Array.isArray(message) ? message : [message]
         const compressed = compressAndEncodeMessage(messages)
         await write(compressed)
 
@@ -181,38 +222,30 @@ function createMessageStream() {
 // Create singleton instance
 const messageStream = createMessageStream()
 
-// Export singleton methods with broadcast wrapper for string messages
-export const {
-  listen,
-  stopListener,
-  stopAllListeners: stopListening,
-  onOutboundMessage,
-  onInboundMessage,
-} = messageStream
+// Export singleton methods
+export const { onInboundMessage, onOutboundMessage, stopAllHandlers } = messageStream
 
-// Export broadcast with string message support
+// Export broadcast with proper message handling
 export function broadcast(
-  message: ServerMessage | ServerMessage[] | AsyncIterable<ServerMessage> | string,
-  type?: 'chat' | 'progress'
+  message: ServerMessage | ServerMessage[] | string,
+  type: ServerMessage['type'] = 'chat'
 ): Promise<void> {
-  // If type is provided, wrap the message in the appropriate type
-  if (typeof message === 'string' && type) {
+  // If string message, wrap it in a proper ServerMessage
+  if (typeof message === 'string') {
     return messageStream.broadcast({
       type,
       content: message,
       timestamp: Date.now(),
     })
   }
-  return messageStream.broadcast(
-    message as ServerMessage | ServerMessage[] | AsyncIterable<ServerMessage>
-  )
-}
 
-// Helper functions
-async function toArray<T>(iterable: AsyncIterable<T>): Promise<T[]> {
-  const result: T[] = []
-  for await (const item of iterable) {
-    result.push(item)
-  }
-  return result
+  // Add timestamps to all messages
+  const messages = Array.isArray(message) ? message : [message]
+  const timestampedMessages = messages.map(msg => ({
+    ...msg,
+    timestamp: msg.timestamp || Date.now(),
+  }))
+
+  // Broadcast the timestamped messages
+  return messageStream.broadcast(timestampedMessages)
 }

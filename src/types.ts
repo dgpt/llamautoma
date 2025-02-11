@@ -17,72 +17,25 @@ import {
   FileOp,
   CommandOp,
 } from 'llamautoma-types'
+import { Config, ConfigSchema } from './config'
 
 // Task types
-export const TaskTypeSchema = z.enum([
-  'code', // coder is writing code based on the plan
-  'chat', // planner has decided no plan is needed, so we're just chatting
-  'plan', // planner is creating a plan based on the conversation
-  'review', // reviewer is reviewing the coder's output
-  'summarize', // summarizer is summarizing the conversation
-])
-export type TaskType = z.infer<typeof TaskTypeSchema>
-
-// Safety configuration schema and types
-export const SafetyConfigSchema = z
-  .object({
-    requireToolConfirmation: z.boolean().default(true).optional(),
-    requireToolFeedback: z.boolean().default(true).optional(),
-    maxInputLength: z.number().min(1).default(8192).optional(),
-    dangerousToolPatterns: z
-      .array(z.string())
-      .default([
-        'drop',
-        'truncate',
-        'exec',
-        'curl',
-        'wget',
-        'bash -c',
-        'rm  -rf /',
-        'zsh -c',
-        'sh -c',
-      ])
-      .optional(),
-  })
-  .optional()
-
-// Default agent configuration
-export const DEFAULT_AGENT_CONFIG = {
-  modelName: 'qwen2.5-coder:1.5b',
-  host: 'http://localhost:11434',
-  maxIterations: 10,
-  userInputTimeout: 30000,
-  safetyConfig: {
-    requireToolConfirmation: true,
-    requireToolFeedback: true,
-    maxInputLength: 8192,
-    dangerousToolPatterns: [
-      'rm -rf /',
-      'DROP TABLE',
-      'sudo rm',
-      'wget http',
-      'curl',
-      'exec',
-      'bash -c',
-      'zsh -c',
-      'sh -c',
-    ],
-  },
+export enum TaskType {
+  Code = 'code', // coder is writing code based on the plan
+  Chat = 'chat', // planner has decided no plan is needed, so we're just chatting
+  Plan = 'plan', // planner is creating a plan based on the conversation
+  Review = 'review', // reviewer is reviewing the coder's output
+  Summarize = 'summarize', // summarizer is summarizing the conversation
+  Intent = 'intent', // intent classifier for determining request type
 }
 
 // Base schema for all requests
-export const BaseRequestSchema = z.object({
-  threadId: z.string().optional(),
-  checkpoint: z.string().optional(),
-  modelName: z.string().optional(),
-  host: z.string().optional(),
-  safetyConfig: SafetyConfigSchema,
-})
+export const BaseRequestSchema = z
+  .object({
+    threadId: z.string().optional(),
+    checkpoint: z.string().optional(),
+  })
+  .merge(ConfigSchema.partial())
 
 export type BaseRequest = z.infer<typeof BaseRequestSchema>
 
@@ -108,16 +61,9 @@ export type SyncRequest = z.infer<typeof SyncRequestSchema>
 
 // Base runnable configuration
 export interface RunnableConfig extends Omit<LangChainRunnableConfig, 'configurable'> {
-  modelName: string
-  host: string
+  config: Config
   threadId?: string
   checkpoint?: string
-  safetyConfig?: {
-    requireToolConfirmation: boolean
-    requireToolFeedback: boolean
-    maxInputLength: number
-    dangerousToolPatterns: string[]
-  }
   memoryPersist?: boolean
   configurable?: {
     thread_id: string

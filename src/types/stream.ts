@@ -29,7 +29,7 @@ export interface ServerToClientMessage {
   messages?: BaseMessage[]
   response?: unknown
   metadata?: Record<string, unknown>
-  timestamp: number
+  timestamp?: number
 }
 
 /**
@@ -39,7 +39,7 @@ export interface ClientToServerMessage {
   type: ClientToServerMessageType
   data: unknown
   metadata?: Record<string, unknown>
-  timestamp: number
+  timestamp?: number
 }
 
 /**
