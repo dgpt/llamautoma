@@ -80,16 +80,37 @@ export const reviewerTask = task(
   }
 )
 
-function extractSuggestions(feedback: string): Array<{ step: string; action: string }> {
-  const suggestions: Array<{ step: string; action: string }> = []
+function extractSuggestions(feedback: string): Array<{
+  step: string
+  action: string
+  priority: 'high' | 'medium' | 'low'
+}> {
+  const suggestions: Array<{ step: string; action: string; priority: 'high' | 'medium' | 'low' }> =
+    []
   const lines = feedback.split('\n')
 
   for (const line of lines) {
     const match = line.match(/^(\d+\.\s*|\-\s*)(.*?):\s*(.*)$/)
     if (match) {
+      // Determine priority based on keywords in the action
+      const action = match[3].trim()
+      let priority: 'high' | 'medium' | 'low' = 'medium'
+
+      // Check for high priority keywords
+      if (/\b(critical|urgent|security|crash|error|bug|must|required|essential)\b/i.test(action)) {
+        priority = 'high'
+      }
+      // Check for low priority keywords
+      else if (
+        /\b(minor|cosmetic|optional|nice to have|consider|might|could|style)\b/i.test(action)
+      ) {
+        priority = 'low'
+      }
+
       suggestions.push({
         step: match[2].trim(),
-        action: match[3].trim(),
+        action: action,
+        priority: priority,
       })
     }
   }
