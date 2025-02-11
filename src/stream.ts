@@ -196,12 +196,31 @@ function createMessageStream() {
       return Promise.resolve()
     },
 
-    async broadcast(message: ServerMessage | ServerMessage[]): Promise<void> {
+    async broadcast(
+      message: ServerMessage | ServerMessage[] | string,
+      type: ServerMessage['type'] = 'chat',
+      metadata?: Record<string, unknown>
+    ): Promise<void> {
       if (!isListening) return // Don't broadcast if not listening
 
       try {
+        if (typeof message === 'string') {
+          return messageStream.broadcast({
+            type,
+            content: message,
+            timestamp: Date.now(),
+            metadata,
+          })
+        }
+
         const messages = Array.isArray(message) ? message : [message]
-        const compressed = compressAndEncodeMessage(messages)
+        const timestampedMessages = messages.map(msg => ({
+          ...msg,
+          timestamp: msg.timestamp || Date.now(),
+          metadata: { ...metadata, ...msg.metadata },
+        }))
+
+        const compressed = compressAndEncodeMessage(timestampedMessages)
         await write(compressed)
 
         // Notify outbound handlers
@@ -228,7 +247,8 @@ export const { onInboundMessage, onOutboundMessage, stopAllHandlers } = messageS
 // Export broadcast with proper message handling
 export function broadcast(
   message: ServerMessage | ServerMessage[] | string,
-  type: ServerMessage['type'] = 'chat'
+  type: ServerMessage['type'] = 'chat',
+  metadata?: Record<string, unknown>
 ): Promise<void> {
   // If string message, wrap it in a proper ServerMessage
   if (typeof message === 'string') {
@@ -236,6 +256,7 @@ export function broadcast(
       type,
       content: message,
       timestamp: Date.now(),
+      metadata,
     })
   }
 
@@ -244,8 +265,20 @@ export function broadcast(
   const timestampedMessages = messages.map(msg => ({
     ...msg,
     timestamp: msg.timestamp || Date.now(),
+    metadata: { ...metadata, ...msg.metadata },
   }))
 
   // Broadcast the timestamped messages
   return messageStream.broadcast(timestampedMessages)
+}
+
+// Export broadcastMessage as an alias for broadcast for backward compatibility
+export const broadcastMessage = broadcast
+
+// Export broadcastProgress for progress updates
+export function broadcastProgress(
+  message: string,
+  metadata?: Record<string, unknown>
+): Promise<void> {
+  return broadcast(message, 'status', metadata)
 }

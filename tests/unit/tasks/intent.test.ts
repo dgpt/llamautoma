@@ -149,7 +149,6 @@ describe('Intent Task Tests', () => {
     )
 
     const messages = [
-      new SystemMessage({ content: 'You are a helpful assistant.' }),
       new HumanMessage({
         content: 'Can you explain the difference between React hooks and class components?',
       }),
@@ -164,7 +163,7 @@ describe('Intent Task Tests', () => {
         },
       }
     )
-
+    console.log(result)
     expect(result).toBeDefined()
     expect(result.type).toBe('chat')
     expect(result.explanation).toBeDefined()

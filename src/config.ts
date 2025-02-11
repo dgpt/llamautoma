@@ -57,10 +57,10 @@ export const TEST_CONFIG = {
   ...DEFAULT_CONFIG,
   models: {
     coder: 'qwen2.5-coder:7b',
-    intent: 'llama3.2',
-    planner: 'llama3.2',
-    reviewer: 'qwen2.5-coder:1.5b',
-    summarizer: 'llama3.2',
+    intent: 'qwen2.5-coder:7b',
+    planner: 'qwen2.5-coder:7b',
+    reviewer: 'qwen2.5-coder:7b',
+    summarizer: 'qwen2.5-coder:7b',
   },
 }
 

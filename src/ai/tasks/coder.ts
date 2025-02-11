@@ -57,9 +57,21 @@ function parseFiles(sections: string[]): Array<{
  * Attempts to extract and parse JSON from a string that may contain other content
  */
 function extractAndParseJson(text: string): any {
-  // First, try to find the outermost JSON object
+  // First, try to parse the entire text as JSON
+  try {
+    const result = JSON.parse(text)
+    if (typeof result === 'object' && result !== null && 'files' in result) {
+      return result
+    }
+  } catch (error) {
+    // If that fails, try to extract JSON from the text
+    logger.debug('Failed to parse entire text as JSON, attempting to extract JSON object')
+  }
+
+  // Try to find JSON objects in the text
   const matches = Array.from(text.matchAll(/\{(?:[^{}]|(?:\{[^{}]*\}))*\}/g))
   if (!matches.length) {
+    logger.error('No JSON object found in response')
     throw new Error('No JSON object found in response')
   }
 
@@ -77,6 +89,9 @@ function extractAndParseJson(text: string): any {
         .replace(/\r/g, '\\r') // Fix unescaped carriage returns
         .replace(/\t/g, '\\t') // Fix unescaped tabs
         .replace(/(?<!\\)\\(?!["\\/bfnrtu])/g, '\\\\') // Fix invalid escapes
+        .replace(/\/\*[\s\S]*?\*\//g, '') // Remove block comments
+        .replace(/\/\/.*/g, '') // Remove line comments
+        .replace(/\s+/g, ' ') // Normalize whitespace
         .trim()
 
       const result = JSON.parse(cleanJson)
@@ -85,12 +100,16 @@ function extractAndParseJson(text: string): any {
       if (typeof result === 'object' && result !== null && 'files' in result) {
         return result
       }
+
+      logger.debug('Found JSON object but missing required "files" property:', result)
     } catch (error) {
+      logger.debug('Failed to parse potential JSON:', error)
       // Continue to next potential JSON if this one fails
       continue
     }
   }
 
+  logger.error('No valid JSON object found in response')
   throw new Error('No valid JSON object found in response')
 }
 
@@ -108,7 +127,7 @@ export const coderTask = task(
     config?: LlamautomaConfig
   ) => {
     // Update initial progress
-    broadcastProgress('Generating code...', config?.configurable)
+    await broadcastProgress('Generating code...', config?.configurable)
 
     // Convert messages to string for context
     const context = input.messages.map(getMessageString).join('\n')
@@ -208,7 +227,12 @@ Example response:
     }
 
     // Update progress with completion
-    broadcastMessage(`Generated ${result.files.length} file(s)`, config?.configurable)
+    await broadcastMessage({
+      type: 'code',
+      content: `Generated ${result.files.length} file(s)`,
+      timestamp: Date.now(),
+      metadata: config?.configurable,
+    })
 
     // Return result in expected schema format
     return CoderTaskSchema.parse({

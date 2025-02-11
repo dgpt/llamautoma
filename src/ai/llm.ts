@@ -76,3 +76,9 @@ export function createStructuredLLM<T>(schema: z.ZodType<T>, taskType: TaskType 
 
 // Export for testing
 export const testLLM = createLLM(TaskType.Code, TEST_CONFIG)
+
+// Default export for common use case
+export default createLLM(TaskType.Code)
+
+// Export a default llm instance for tests
+export const llm = testLLM
